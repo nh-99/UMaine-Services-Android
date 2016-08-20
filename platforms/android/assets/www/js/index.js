@@ -79,16 +79,12 @@ function login() {
 	method: 'POST',
 	contentType: "application/json",
 	data: dataToSend,
-	dataType: 'json',
 	url: 'https://jrvcd.xyz:9001/login',
 	crossDomain: true,
 	dataType: 'json',
 	success: function(res) {
 	    window.localStorage.setItem("token", dataToSend);
 	    location.href = "#!pagetwo"
-	},
-	complete: function(res) {
-	    phonon.notif('There was an issue logging in.', 3000, false);
 	}
     });
 }
@@ -101,7 +97,8 @@ function register() {
     
     var req = $.ajax({
 	    method: 'POST',
-	    data: {"username": user, "email": email, "password": pass},
+	    contentType: "application/json",
+	    data: JSON.stringify({"username": user, "email": email, "password": pass}),
 	    url: 'https://jrvcd.xyz:9001/register',
 	    crossDomain: true,
 	    dataType: 'json',
@@ -113,10 +110,11 @@ function register() {
     }
 
 function changePin() {
-    var authInfo = window.localStorage.getItem("token");
+    var authInfo = JSON.parse(window.localStorage.getItem("token"));
     var req = $.ajax({
 		method: 'POST',
-        data: {"username": authInfo.username, "password": authInfo.password},
+		contentType: "application/json",
+		data: JSON.stringify({"username": authInfo.username, "password": authInfo.password}),
 		url: 'https://jrvcd.xyz:9000/pin/change',
 		crossDomain: true,
 		dataType: 'json',
