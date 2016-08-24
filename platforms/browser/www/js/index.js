@@ -65,6 +65,37 @@ app.on({page: 'roomassignment', preventClose: true, content: 'roomassignment.htm
 
 app.on({page: 'pinchange', preventClose: true, content: 'pinchange.html', readyDelay: 1});
 
+app.on({page: 'mainestreet', preventClose: true, content: 'mainestreet.html', readyDelay: 1});
+
+app.on({page: 'messagecenter', preventClose: true, content: 'messagecenter.html', readyDelay: 1}, function(activity) {
+    var onAction = function(evt) {
+    };
+
+    activity.onCreate(function() {
+	var authInfo = JSON.parse(window.localStorage.getItem("token"));
+	var req = $.ajax({
+		    method: 'GET',
+		    data: {"username": authInfo.username, "password": authInfo.password},
+		    url: 'https://jrvcd.xyz:9002/studentcenter/messages',
+		    crossDomain: true,
+		    success: function(res) {
+			document.getElementById("messagecenter-loading").remove();
+			document.getElementById("table-loc").innerHTML = '<table class="messagecenter-table"><thead><tr><th>Description</th><th>Date</th><th>Viewed</th></tr></thead><tbody id="mctablebody"></tbody></table>';
+			for(i = 0; i < res.messages.length; i++){
+			    var hasBeenViewed = "No";
+			    if(res.messages[i].viewed == true) {
+				hasBeenViewed = "Yes";
+			    }
+			    document.getElementById("mctablebody").innerHTML += '<tr><td >' + res.messages[i].description + '</td><td >' + res.messages[i].date + '</td><td >' + hasBeenViewed + '</td></tr>';
+			}
+		    }
+	    });
+	});
+
+    activity.onClose(function(self) {
+    });
+});
+
 app.start();
 
 function login() {
