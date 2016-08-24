@@ -358,6 +358,9 @@ button {
 .primary {
   background-color: #0084e7 !important;
 }
+.primary-blue {
+  background-color: #3098D4 !important;
+}
 .primary.btn-flat {
   color: #0084e7 !important;
 }
