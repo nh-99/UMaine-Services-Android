@@ -117,18 +117,27 @@ phonon.device = (function () {
             break;
 
         case 'iOS':
-            osVersion = /OS (\d+)_(\d+)_?(\d+)?/.exec(nVer);
-            osVersion = osVersion[1] + '.' + osVersion[2] + '.' + (osVersion[3] | 0);
+
+            // iOS 8+ UA changed
+            if (/(iphone|ipod|ipad).* os 8_/.test(ua.toLowerCase())) {
+                osVersion = ua.toLowerCase().split('version/')[1].split(' ')[0];
+            } else {
+                osVersion = /OS (\d+)_(\d+)_?(\d+)?/.exec(nVer);
+                osVersion = osVersion[1] + '.' + osVersion[2] + '.' + (osVersion[3] | 0);
+            }
             break;
     }
 
 
     return {
         os: os,
-        osVersion: osVersion
+        osVersion: osVersion,
+        ANDROID: 'Android',
+        IOS: 'iOS'
     };
 
 })();
+
 phonon.browser = (function () {
 
     /**
@@ -237,11 +246,11 @@ phonon.ajax = (function () {
      * @private
      */
     var toJSON = function(responseText) {
-        var response;
+        var response = null;
         try  {
             response = JSON.parse(responseText);
         } catch (e) {
-            response = 'JSON_MALFORMED';
+            response = null;
         }
         return response;
     };
@@ -300,33 +309,44 @@ phonon.ajax = (function () {
             if(dataType === 'xml') {
                 if(xhr.overrideMimeType) xhr.overrideMimeType('application/xml; charset=utf-8');
             }
-            if(headers != null) {
-				for(var i = 0; i == headers.length; i++) {
-					first = Object.keys(headers)[i];
-					second = Object.values(headers)[i];
-					xhr.setRequestHeader(first,second);
-				}
-			}
+
+						if(typeof headers === 'object') {
+							var key;
+							for(key in headers) {
+								xhr.setRequestHeader(key, headers[key]);
+							}
+						}
 
             xhr.onreadystatechange = function(event) {
-                if (xhr.readyState === 4) {
-                    if (xhr.status === 200) {
-                        // Success
 
-                        if(dataType === 'json') {
-                            var json = toJSON(xhr.responseText);
-                            if(json !== 'JSON_MALFORMED') success(json);
-                            else {
-                                if (typeof error === 'function') error(json, event);
-                            }
-                        } else if(dataType === 'xml') success(xhr.responseXML);
-                        else success(xhr.responseText);
+                if (xhr.readyState === 4) {
+
+										var res = null;
+
+										if(dataType === 'json') {
+											res = toJSON(xhr.responseText);
+											if(res === null) {
+												flagError = 'JSON_MALFORMED';
+											}
+										} else if(dataType === 'xml') {
+											res = xhr.responseXML;
+										} else {
+											res = xhr.responseText;
+										}
+
+										var status = xhr.status.toString();
+
+										// Success 2xx
+                    if (status[0] === '2') {
+
+											success(res, xhr);
 
                     } else {
-                        // page not found (error: 404)
+
+                        // error
                         if (typeof error === 'function') {
                             window.setTimeout(function() {
-                                error(flagError, event);
+                                error(res, flagError, xhr);
                             }, 1);
                         }
                     }
@@ -359,7 +379,7 @@ phonon.ajax = (function () {
 	};
 })();
 
-phonon.event = (function () {
+phonon.event = (function ($) {
 
     /**
      * Events
@@ -368,29 +388,33 @@ phonon.event = (function () {
      * [3] transitionEnd and animationEnd polyfill
      */
 
+	// Use available events
+	// mousecancel does not exists
+    var availableEvents = ['mousedown', 'mousemove', 'mouseup'];
+
     // Check if touch is enabled
     var hasTouch = false;
     if(('ontouchstart' in window) || window.DocumentTouch && document instanceof DocumentTouch) {
         hasTouch = true;
+		availableEvents = ['touchstart', 'touchmove', 'touchend', 'touchcancel'];
     }
 
-    // Use available events
-    var desktopEvents = ['mousedown', 'mousemove', 'mouseup'];
-
     if (window.navigator.pointerEnabled) {
-        desktopEvents = ['pointerdown', 'pointermove', 'pointerup'];
+        availableEvents = ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'];
     } else if (window.navigator.msPointerEnabled) {
-        desktopEvents = ['MSPointerDown', 'MSPointerMove', 'MSPointerUp'];
+        availableEvents = ['MSPointerDown', 'MSPointerMove', 'MSPointerUp', 'MSPointerCancel'];
     }
 
     var api = {};
 
     api.hasTouch = hasTouch;
-    api.start = hasTouch ? 'touchstart' : desktopEvents[0];
-    api.move = hasTouch ? 'touchmove' : desktopEvents[1];
-    api.end = hasTouch ? 'touchend' : desktopEvents[2];
-    api.tap = 'tap';
 
+    api.start = availableEvents[0];
+    api.move = availableEvents[1];
+    api.end = availableEvents[2];
+	api.cancel = typeof availableEvents[3] === 'undefined' ? null : availableEvents[3];
+
+    api.tap = 'tap';
 
     /**
      * Animation/Transition event polyfill
@@ -438,10 +462,9 @@ phonon.event = (function () {
         transitionEnd = 'webkitTransitionEnd';
         animationEnd = 'webkitAnimationEnd';
     }
-    
+
     api.transitionEnd = transitionEnd;
     api.animationEnd = animationEnd;
-
 
     var tapEls = [];
 
@@ -453,49 +476,62 @@ phonon.event = (function () {
             this.moved = false;
             this.startX = 0;
             this.startY = 0;
-            this.hasTouchEventOccured = false;
+
             this.el.addEventListener(api.start, this, false);
         }
 
         TapElement.prototype.start = function(e) {
 
-            if (e.type === 'touchstart') {
-
-                this.hasTouchEventOccured = true;
-                this.el.addEventListener('touchmove', this, false);
-                this.el.addEventListener('touchend', this, false);
-                this.el.addEventListener('touchcancel', this, false);
-
-            } else {
-
-                this.el.addEventListener(api.end, this, false);
-            }
+            this.el.addEventListener(api.move, this, false);
+            this.el.addEventListener(api.end, this, false);
 
             this.moved = false;
-            this.startX = e.type === 'touchstart' ? e.touches[0].clientX : e.clientX;
-            this.startY = e.type === 'touchstart' ? e.touches[0].clientY : e.clientY;
+
+            this.startX = (e.touches ? e.touches[0].clientX : e.clientX);
+            this.startY = (e.touches ? e.touches[0].clientY : e.clientY);
         };
 
         TapElement.prototype.move = function(e) {
+
+			var moveX = (e.touches ? e.touches[0].clientX : e.clientX);
+            var moveY = (e.touches ? e.touches[0].clientY : e.clientY);
+
             //if finger moves more than 10px flag to cancel
-            if (Math.abs(e.touches[0].clientX - this.startX) > 10 || Math.abs(e.touches[0].clientY - this.startY) > 10) {
+            if (Math.abs(moveX - this.startX) > 10 || Math.abs(moveY - this.startY) > 10) {
                 this.moved = true;
             }
         };
 
         TapElement.prototype.end = function(e) {
-            this.el.removeEventListener('touchmove', this, false);
-            this.el.removeEventListener('touchend', this, false);
-            this.el.removeEventListener('touchcancel', this, false);
+
+			this.el.removeEventListener(api.move, this, false);
             this.el.removeEventListener(api.end, this, false);
 
+			if (api.cancel !== null) this.el.removeEventListener(api.cancel, this, false);
+
             if (!this.moved) {
+
+                /**
+                 * jQuery/Zepto compatibility with the tap event
+                 * See issue: #147
+                 */
+                if (typeof $ !== 'undefined') {
+                    var event = new window.CustomEvent(
+                    	this.tap,
+                    	{
+                    		detail: {},
+                    		bubbles: true,
+                    		cancelable: true
+                    	}
+                    );
+                    this.el.dispatchEvent(event);
+                }
+
                 this.callback(e);
             }
         };
 
         TapElement.prototype.cancel = function() {
-            this.hasTouchEventOccured = false;
             this.moved = false;
             this.startX = 0;
             this.startY = 0;
@@ -505,15 +541,15 @@ phonon.event = (function () {
             this.el.removeEventListener(api.start, this, false);
             this.el.removeEventListener(api.move, this, false);
             this.el.removeEventListener(api.end, this, false);
-            this.el.removeEventListener('touchcancel', this, false);
+			if(api.cancel !== null) this.el.removeEventListener(api.cancel, this, false);
         };
 
         TapElement.prototype.handleEvent = function(e) {
             switch (e.type) {
                 case api.start: this.start(e); break;
-                case 'touchmove': this.move(e); break;
+                case api.move: this.move(e); break;
                 case api.end: this.end(e); break;
-                case 'touchcancel': this.cancel(e); break;
+                case api.cancel: this.cancel(e); break; // api.cancel can be null
             }
         };
 
@@ -521,52 +557,78 @@ phonon.event = (function () {
     })();
 
     phonon.on = function(el, eventName, callback, useCapture) {
+        var addEvent = function(el, eventName, callback, useCapture) {
+            if(eventName === api.tap) {
+                var tap = new TapElement(el, callback);
+                tapEls.push(tap);
+                return;
+            }
 
-        if(eventName === api.tap) {
-            var tap = new TapElement(el, callback);
-            tapEls.push(tap);
-            return;
-        }
+            if(el.addEventListener) {
+                el.addEventListener(eventName, callback, useCapture);
+            } else if(el.attachEvent) {
+                el.attachEvent('on' + eventName, callback, useCapture);
+            }
+        };
 
-        if(el.addEventListener) {
-            el.addEventListener(eventName, callback, useCapture);
-        } else if(el.attachEvent) {
-            el.attachEvent('on' + eventName, callback, useCapture);
+        if(typeof el.length !== 'undefined') {
+            var i = 0;
+            var l = el.length;
+            for (; i < l; i++) {
+                addEvent(el[i], eventName, callback, useCapture)
+            }
+            return
         }
+        addEvent(el, eventName, callback, useCapture)
     };
 
-    window.on = document.on = HTMLElement.prototype.on = function(type, listener, useCapture) {
+    window.on = document.on = NodeList.prototype.on = HTMLElement.prototype.on = function(type, listener, useCapture) {
         phonon.on(this, type, listener, useCapture);
     };
 
     phonon.off = function(el, eventName, callback, useCapture) {
 
-        if(eventName === api.tap) {
-
-            for (var i = tapEls.length - 1; i >= 0; i--) {
-                if(tapEls[i].el === el) {
-                    tapEls[i].off();
-                    tapEls.splice(i, 1);
-                    break;
+        var removeEvent = function (el, eventName, callback, useCapture) {
+            if(eventName === api.tap) {
+                var i = 0;
+                var l = el.length;
+                for (; i < l; i++) {
+                    if(tapEls[i].el === el) {
+                        tapEls[i].off();
+                        tapEls.splice(i, 1);
+                        break;
+                    }
                 }
+                return;
             }
-            return;
+
+            if(el.removeEventListener) {
+                el.removeEventListener(eventName, callback, useCapture);
+            } else if(el.attachEvent) {
+                el.detachEvent('on' + eventName, callback, useCapture);
+            }
+        };
+
+        if(typeof el.length !== 'undefined') {
+            var i = 0;
+            var l = el.length;
+            for (; i < l; i++) {
+                removeEvent(el[i], eventName, callback, useCapture)
+            }
+            return
         }
 
-        if(el.removeEventListener) {
-            el.removeEventListener(eventName, callback, useCapture);
-        } else if(el.attachEvent) {
-            el.detachEvent('on' + eventName, callback, useCapture);
-        }
+        removeEvent(el, eventName, callback, useCapture)
     };
 
-    window.off = document.off = HTMLElement.prototype.off = function(type, listener, useCapture) {
+    window.off = document.off = NodeList.prototype.off = HTMLElement.prototype.off = function(type, listener, useCapture) {
         phonon.off(this, type, listener, useCapture);
     };
 
     return api;
 
-})();
+})(window.jQuery);
+
 phonon.tagManager = (function () {
 
 	if(typeof riot === 'undefined') {
@@ -608,7 +670,6 @@ phonon.tagManager = (function () {
 })();
 	// init
 	phonon.options = function(options) {
-
 		var useI18n = false;
 		if(typeof options.i18n === 'object' && options.i18n !== null) {
 			phonon.i18n(options.i18n);
@@ -622,16 +683,16 @@ phonon.tagManager = (function () {
 	/**
 	 * Shortcuts for dialog
 	 */
-	phonon.alert = function(text, title, cancelable) {
-		return phonon.dialog().alert(text, title, cancelable);
+	phonon.alert = function(text, title, cancelable, textOk) {
+		return phonon.dialog().alert(text, title, cancelable, textOk);
 	};
 
-	phonon.confirm = function(text, title, cancelable) {
-		return phonon.dialog().confirm(text, title, cancelable);
+	phonon.confirm = function(text, title, cancelable, textOk, textCancel) {
+		return phonon.dialog().confirm(text, title, cancelable, textOk, textCancel);
 	};
 
-	phonon.prompt = function(text, title, cancelable) {
-		return phonon.dialog().prompt(text, title, cancelable);
+	phonon.prompt = function(text, title, cancelable, textOk, textCancel) {
+		return phonon.dialog().prompt(text, title, cancelable, textOk, textCancel);
 	};
 
 	phonon.indicator = function(title, cancelable) {
@@ -664,6 +725,7 @@ phonon.tagManager = (function () {
 			}
 		});
 	};
+
 	
 	window.phonon = phonon
 
@@ -716,6 +778,16 @@ phonon.tagManager = (function () {
             el.textContent = text;
         }
     };
+    
+    /**
+    * Binds some html to the given DOM element
+    * @param {DOMObject} el
+    * @param {String} text
+    * @private
+    */
+    var setHtml = function (el, text){
+        el.innerHTML = text;
+    }
 
     /**
      * Binds the value to the given DOM element
@@ -758,6 +830,8 @@ phonon.tagManager = (function () {
                 if (json[value] !== undefined) {
                     if (key === 'text') {
                         setText(el, json[value]);
+                    } else if (key === 'html') {
+                        setHtml(el, json[value]);
                     } else if (key === 'value') {
                         setValue(el, json[value]);
                     } else if (key === 'placeholder') {
@@ -1002,8 +1076,9 @@ phonon.tagManager = (function () {
     };
 
 }(window, document));
+
 /* ========================================================================
- * Phonon: navigator.js v1.1
+ * Phonon: navigator.js v1.2
  * http://phonon.quarkdev.com
  * ========================================================================
  * Licensed under MIT (http://phonon.quarkdev.com)
@@ -1011,6 +1086,8 @@ phonon.tagManager = (function () {
 ;(function (window, riot, phonon) {
 
   'use strict';
+
+  window.phononDOM = {}
 
   var pages = [];
   var pageHistory = [];
@@ -1027,6 +1104,7 @@ phonon.tagManager = (function () {
 
   var opts = {
     defaultPage: null,
+    defaultTemplateExtension: null,
     hashPrefix: '!',
     animatePages: true,
     templateRootDirectory: '',
@@ -1044,8 +1122,18 @@ phonon.tagManager = (function () {
 
     /**
      * @constructor
+	 * @param {Object} scope
      */
-    function Activity() {}
+    function Activity(scope) {
+		if(typeof scope === 'object') {
+			var handler;
+			for(handler in scope) {
+				if(this[handler] !== undefined && this[handler] !== 'constructor') {
+					this[handler + 'Callback'] = scope[handler];
+				}
+			}
+		}
+	}
 
     /**
      *
@@ -1114,17 +1202,31 @@ phonon.tagManager = (function () {
    */
   var getPageObject = function(pageName) {
 
-    var page = null;
     var i = pages.length - 1;
 
     for (; i >= 0; i--) {
       if(pages[i].name === pageName) {
-        page = pages[i];
-        break;
+        return pages[i];
       }
     }
-    return page;
+    return null;
   };
+
+  function DOMEval(pageName, code) {
+      // create page in window object
+      if(typeof window.phononDOM[pageName] === 'undefined') {
+        window.phononDOM[pageName] = {}
+      }
+
+      // add a js variable as shortcut
+      var fullCode = 'var page = window.phononDOM["' + pageName + '"];';
+      fullCode += code;
+
+      // execute script
+	  var script = document.createElement('script');
+	  script.text = fullCode;
+	  document.head.appendChild(script).parentNode.removeChild(script);
+  }
 
   /**
    * Retrives the DOM element for a given page
@@ -1173,10 +1275,48 @@ phonon.tagManager = (function () {
 
       previousPageEl.classList.remove('app-active');
     }
+
     callTransitionEnd(currentPage);
     callHiddenCallback(previousPage);
 
     onActiveTransition = false;
+  }
+
+  function dispatchDOMEvent(eventName, pageName, parameters) {
+
+	  var eventInitDict = {
+          detail: { page: pageName },
+          bubbles: true,
+          cancelable: true
+      };
+
+	  if(typeof parameters !== 'undefined') {
+		  eventInitDict.detail.req = parameters
+	  }
+
+	  var event = new window.CustomEvent(eventName, eventInitDict);
+
+	  document.dispatchEvent(event);
+  }
+
+  /**
+   * Dispatches page event from addEvent API
+   *
+   * @param {String} eventName
+   * @param {Array} eventHandlers
+   * @param {Object} data
+   */
+  function dispatchEvent(eventName, eventHandlers, data) {
+      var i = 0;
+      var l = eventHandlers.length;
+      for (; i < l; i++) {
+          var eventHandler = eventHandlers[i]
+          if (eventHandler.event === eventName) {
+              if (typeof eventHandler.callback === 'function') {
+                  eventHandler.callback(data)
+              }
+          }
+      }
   }
 
   function callCreate(pageName) {
@@ -1186,30 +1326,33 @@ phonon.tagManager = (function () {
       phonon.tagManager.trigger(pageName, 'create');
     }
 
-    var page = getPageObject(pageName);
+    /*
+     * dispatch the event before calling the activity's callback
+     * so that UI components are ready to use
+     * issue #52 is related to this
+    */
+	dispatchDOMEvent('pagecreated', pageName)
 
-    // Page Scope is called once during the onCreate process
-    if(typeof page.callback === 'function') {
-      page.callback(page.activity);
-    }
+	var page = getPageObject(pageName);
 
     // Call the onCreate callback
     if(page.activity instanceof Activity && typeof page.activity.onCreateCallback === 'function') {
       page.activity.onCreateCallback();
     }
 
-    var pageEvent = new window.CustomEvent('pagecreated', {
-        detail: { page: pageName },
-        bubbles: true,
-        cancelable: true
-    });
+    dispatchEvent('create', page.callbackRegistered);
 
-    document.dispatchEvent(pageEvent);
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onCreate'];
+        if(typeof fn === 'function') {
+            fn()
+        }
+    }
   }
 
   function callReady(pageName) {
 
-    var page = getPageObject(pageName);
+	var page = getPageObject(pageName);
 
     window.setTimeout(function() {
 
@@ -1218,19 +1361,22 @@ phonon.tagManager = (function () {
         phonon.tagManager.trigger(pageName, 'ready');
       }
 
+      // Dispatch the global event pageopened
+	  dispatchDOMEvent('pageopened', pageName)
+
       // Call the onReady callback
       if(page.activity instanceof Activity && typeof page.activity.onReadyCallback === 'function') {
         page.activity.onReadyCallback();
       }
 
-      // Dispatch the global event pageopened
-      var pageEvent = new window.CustomEvent('pageopened', {
-          detail: { page: pageName },
-          bubbles: true,
-          cancelable: true
-      });
+      dispatchEvent('ready', page.callbackRegistered)
 
-      document.dispatchEvent(pageEvent);
+      if(typeof window.phononDOM[page.name] === 'object') {
+          var fn = window.phononDOM[page.name]['onReady'];
+          if(typeof fn === 'function') {
+              fn()
+          }
+      }
 
     }, page.readyDelay);
   }
@@ -1240,24 +1386,47 @@ phonon.tagManager = (function () {
       phonon.tagManager.trigger(pageName, 'transitionend');
     }
 
+	dispatchDOMEvent('pagetransitionend', pageName);
+
     var page = getPageObject(pageName);
 
     // Call the onTransitionEnd callback
     if(page.activity instanceof Activity && typeof page.activity.onTransitionEndCallback === 'function') {
       page.activity.onTransitionEndCallback();
     }
+
+    dispatchEvent('transitionend', page.callbackRegistered)
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onTransitionEnd'];
+        if(typeof fn === 'function') {
+            fn()
+        }
+    }
   }
 
   function callHiddenCallback(pageName) {
+
     if(riotEnabled) {
       phonon.tagManager.trigger(pageName, 'hidden');
     }
+
+	dispatchDOMEvent('pagehidden', pageName)
 
     var page = getPageObject(pageName);
 
     // Call the onHidden callback
     if(page.activity instanceof Activity && typeof page.activity.onHiddenCallback === 'function') {
       page.activity.onHiddenCallback();
+    }
+
+    dispatchEvent('hidden', page.callbackRegistered)
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onHidden'];
+        if(typeof fn === 'function') {
+            fn()
+        }
     }
   }
 
@@ -1267,17 +1436,28 @@ phonon.tagManager = (function () {
       phonon.tagManager.trigger(pageName, 'tabchanged', tabNumber);
     }
 
+	dispatchDOMEvent('pagetabchanged', pageName)
+
     var page = getPageObject(pageName);
 
     // Call the onTabChanged callback
     if(page.activity instanceof Activity && typeof page.activity.onTabChangedCallback === 'function') {
       page.activity.onTabChangedCallback(tabNumber);
     }
+
+    dispatchEvent('tabchanged', page.callbackRegistered, tabNumber);
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onTabChanged'];
+        if(typeof fn === 'function') {
+            fn(tabNumber)
+        }
+    }
   }
 
   function callClose(pageName, nextPageName, hash) {
-
     function close() {
+	  dispatchDOMEvent('pageclosed', pageName)
 
       var currentHash = window.location.hash.split('#')[1];
 
@@ -1308,10 +1488,15 @@ phonon.tagManager = (function () {
     // Call the onclose callback
     if(page.activity instanceof Activity && typeof page.activity.onCloseCallback === 'function') {
       page.activity.onCloseCallback(api);
-    } else {
-      if(!riotEnabled) {
-        throw new Error('The page ' + page.name + ' prevents close, but its callback (onClose) is undefined');
-      }
+    }
+
+    dispatchEvent('close', page.callbackRegistered, api);
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onClose'];
+        if(typeof fn === 'function') {
+            fn(api)
+        }
     }
   }
 
@@ -1323,11 +1508,22 @@ phonon.tagManager = (function () {
       phonon.tagManager.trigger(pageName, 'hashchanged', params);
     }
 
+	dispatchDOMEvent('pagehash', pageName, params)
+
     var page = getPageObject(pageName);
 
     // Call the onHashChanged callback
     if(page.activity instanceof Activity && typeof page.activity.onHashChangedCallback === 'function') {
       page.activity.onHashChangedCallback(params);
+    }
+
+    dispatchEvent('hashchanged', page.callbackRegistered, params);
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onHashChanged'];
+        if(typeof fn === 'function') {
+            fn(params)
+        }
     }
   }
 
@@ -1337,8 +1533,7 @@ phonon.tagManager = (function () {
     }
   }
 
-  function mount(pageName, fn) {
-
+  function mount(pageName, fn, postData) {
     if(riotEnabled) {
 
       riot.compile(function() {
@@ -1361,7 +1556,21 @@ phonon.tagManager = (function () {
 
       if(page.content !== null) {
 
+        if(page.nocache === null || page.showloader === null){
+          var setLoaderAndCache = function(pageName){
+            var elPage = getPageEl(pageName);
+            page.nocache = false
+            page.showloader = false
+              if(elPage.getAttribute('data-nocache') === 'true') page.nocache = true
+              if(elPage.getAttribute('data-loader') === 'true') page.showloader = true
+          };
+          setLoaderAndCache(pageName)
+        }
+
+       if(page.showloader) document.body.classList.add('loading');
+
         loadContent(page.content, function(template) {
+          if(page.showloader) document.body.classList.remove('loading');
 
           var elPage = getPageEl(pageName);
 
@@ -1382,45 +1591,95 @@ phonon.tagManager = (function () {
             if(attr.nodeName !== 'class' && attr.nodeValue !== 'app-page') elPage.setAttribute(attr.nodeName, attr.nodeValue);
           }
 
+
+		  var evalJs = function(element) {
+			  var s = element.getElementsByTagName('script');
+              // convert nodeList to array
+              s = Array.prototype.slice.call(s);
+			  for(var i=0; i < s.length; i++) {
+                  var type = s[i].getAttribute('type');
+                  if(type === 'text/javascript' || type === null) {
+                    DOMEval(page.name, s[i].innerHTML);
+                  }
+			  }
+		  };
+
           if(opts.useI18n) {
             phonon.i18n().bind(virtualElPage, function() {
               elPage.innerHTML = virtualElPage.innerHTML;
+			  evalJs(virtualDiv);
+
               fn();
             });
           } else {
             elPage.innerHTML = virtualElPage.innerHTML;
+			evalJs(virtualDiv);
             fn();
           }
 
-        });
+        }, postData);
       } else {
         fn();
       }
     }
   }
 
-  function loadContent(url, fn) {
+  function loadContent(url, fn, postData) {
     var req = new XMLHttpRequest();
     if(req.overrideMimeType) req.overrideMimeType('text/html; charset=utf-8');
     req.onreadystatechange = function() {
-      if (req.readyState === 4 && req.status === 200) fn(req.responseText);
+      if(req.readyState === 4 && (req.status === 200 || !req.status && req.responseText.length)) {
+        fn(req.responseText, opts, url);
+      }
     };
-    req.open('GET', opts.templateRootDirectory + url, true);
-    req.send('');
+
+    if(typeof postData !== 'string'){
+      req.open('GET', opts.templateRootDirectory + url, true);
+      req.send('');
+    }else{
+      req.open('POST', opts.templateRootDirectory + url, true);
+      req.setRequestHeader('Content-type', 'application/x-www-form-urlencoded');
+      req.send(postData);
+    }
   }
 
-  function addPage(pageName) {
+  function createPage(pageName, properties) {
+	properties = typeof properties === 'object' ? properties : {};
 
-    var page = {
+	var newPage = {
       name: pageName,
       mounted: false,
       async: false,
       activity: null,
       content: null,
-      readyDelay: 1
-    };
+      readyDelay: 1,
+      callbackRegistered: [],
+      nocache: null,
+      showloader: null
+	};
 
-    pages.push(page);
+	var prop;
+	for(prop in properties) {
+		newPage[prop] = properties[prop];
+	}
+
+	return newPage;
+  }
+
+  function createOrUpdatePage(pageName, properties) {
+	  properties = typeof properties === 'object' ? properties : {};
+
+	  var page = getPageObject(pageName);
+	  if(page === null) {
+		  return pages.push(createPage(pageName, properties));
+	  }
+
+	  var prop;
+	  for(prop in properties) {
+		  page[prop] = properties[prop];
+	  }
+
+	  return true;
   }
 
   /**
@@ -1429,12 +1688,11 @@ phonon.tagManager = (function () {
    * @return {Boolean}
    */
   function isComponentVisible() {
-
     // close active dialogs, popovers, panels and side-panels
-    if(typeof phonon.dialog !== 'undefined' && phonon.dialog().closeActive()) return true;
-    if(typeof phonon.popover !== 'undefined' && phonon.popover().closeActive()) return true;
-    if(typeof phonon.panel !== 'undefined' && phonon.panel().closeActive()) return true;
-    if(typeof phonon.sidePanel !== 'undefined' && phonon.sidePanel().closeActive()) return true;
+    if(typeof phonon.dialog !== 'undefined' && phonon.dialogUtil.closeActive()) return true;
+    if(typeof phonon.popover !== 'undefined' && phonon.popoverUtil.closeActive()) return true;
+    if(typeof phonon.panel !== 'undefined' && phonon.panelUtil.closeActive()) return true;
+    if(typeof phonon.sidePanel !== 'undefined' && phonon.sidePanelUtil.closeActive()) return true;
 
     return false;
   }
@@ -1461,8 +1719,36 @@ phonon.tagManager = (function () {
     return page;
   }
 
-  function navigationListener(evt) {
+  function serializeForm(evt){
+    var evt    = evt || window.event;
+    var form   = evt.target;
+    var field, query='';
+    if(typeof form == 'object' && form.nodeName == "FORM"){
+        var i;
+        for(i=form.elements.length-1; i>=0; i--){
+            field = form.elements[i];
+            if(field.name && field.type != 'file' && field.type != 'reset'){
+                if(field.type == 'select-multiple'){
+                    for(j=form.elements[i].options.length-1; j>=0; j--){
+                        if(field.options[j].selected){
+                            query += '&' + field.name + "=" + encodeURIComponent(field.options[j].value).replace(/%20/g,'+');
+                        }
+                    }
+                }
+                else{
+                    if((field.type != 'submit' && field.type != 'button') || evt.target == field){
+                        if((field.type != 'checkbox' && field.type != 'radio') || field.checked){
+                            query += '&' + field.name + "=" + encodeURIComponent(field.value).replace(/%20/g,'+');
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return query.substr(1);
+  }
 
+  function navigationListener(evt) {
     /*
      * user interactions are safed (with or without data-navigation | href)
      * the goal is to prevent the backward button if enableBrowserBackButton = false
@@ -1473,6 +1759,20 @@ phonon.tagManager = (function () {
     var nav = null;
     var validHref = false;
     var params = '';
+    var formData;
+
+    if(evt.type == 'submit'){ // dev
+      var formAction = target.getAttribute('action');
+      if(formAction.match(new RegExp('^#'+opts.hashPrefix))){
+          evt.preventDefault();
+          nav = formAction.substr(1+(opts.hashPrefix.length))
+          callClose(currentPage, nav, opts.hashPrefix+nav);
+          onBeforeTransition(nav, function() {
+              //callHash(nav);
+          }, serializeForm(evt)); // dev
+          return changePage(formAction.substr(1+(opts.hashPrefix.length)))
+      }
+    }
 
     for (; target && target !== document; target = target.parentNode) {
       var dataNav = target.getAttribute('data-navigation');
@@ -1571,9 +1871,18 @@ phonon.tagManager = (function () {
     }
   }
 
-  function onBeforeTransition(pageName) {
-
-    if(onActiveTransition) return;
+  /**
+   * Calls page events (onCreate, onReady) after
+   * the page is actually ready (set its template)
+   * @param {String} pageName
+   * @param {Function} callback
+   */
+  function onBeforeTransition(pageName, callback, postData) {
+    if(onActiveTransition) {
+      if(typeof callback === 'function') {
+        return callback();
+      }
+    }
 
     var page = getPageObject(pageName);
 
@@ -1585,8 +1894,7 @@ phonon.tagManager = (function () {
       currentPage = pageName;
     }
 
-    if(!page.mounted) {
-
+    if(!page.mounted || page.nocache) {
       mount(page.name, function() {
 
         page.mounted = true;
@@ -1609,15 +1917,25 @@ phonon.tagManager = (function () {
           }
         }
 
-      });
+        // call the callback after the mount
+        if(typeof callback === 'function') {
+          callback();
+        }
+      }, postData);
     } else {
 
       callReady(pageName);
       startTransition(previousPage, pageName);
+
+      // call the callback directly
+      if(typeof callback === 'function') {
+        callback();
+      }
     }
   }
 
   function init(options) {
+
     if(typeof options.templateRootDirectory === 'string' && options.templateRootDirectory !== '') {
       options.templateRootDirectory = ( (options.templateRootDirectory.indexOf('/', options.templateRootDirectory.length - '/'.length) !== -1) ? options.templateRootDirectory : options.templateRootDirectory + '/');
     }
@@ -1643,7 +1961,7 @@ phonon.tagManager = (function () {
         page.classList.add('app-page');
       }
 
-      addPage( page.tagName.toLowerCase() );
+      createOrUpdatePage( page.tagName.toLowerCase() );
     }
   }
 
@@ -1694,10 +2012,8 @@ phonon.tagManager = (function () {
   /**
    * @param {String | HashEvent} virtualHash
    */
-  function onRoute(virtualHash) {
-
+  function onRoute(virtualHash, postData) {
     var hash = (typeof virtualHash === 'string' ? virtualHash : window.location.href.split('#')[1] || '');
-
     var pageName;
 
     var parsed = hash.split('/');
@@ -1789,9 +2105,26 @@ phonon.tagManager = (function () {
         pageHistory.push( {page: pageObject.name, params: strParams} );
       }
 
-      onBeforeTransition(pageObject.name);
+      /*
+       * Page Scope is called once before calling callbacks
+       * since v1.0.8, we call the page scope here when the page is not yet mounted
+       * because before this version, the onCreate callback was called before the onHash callback
+       * since v1.0.2 the order has changed => the onHash callback is called before page callbacks (onCreate, etc.)
+       * see issues: #16, #31 and #38
+       */
+      if(typeof pageObject.callback === 'function' && !pageObject.mounted) {
+        pageObject.callback(pageObject.activity);
+      }
 
-      callHash(currentPage, params);
+      if(!pageObject.mounted) {
+        onBeforeTransition(pageObject.name, function() {
+          callHash(pageObject.name, params);
+        }, postData);
+
+      } else {
+        onBeforeTransition(pageObject.name, null, postData);
+        callHash(pageObject.name, params);
+      }
 
       if(!opts.enableBrowserBackButton) safeLink = false;
     }
@@ -1801,33 +2134,34 @@ phonon.tagManager = (function () {
    * One listener to navigate through the app pages
    */
   document.on('tap', navigationListener);
+  /**
+   * Handle (port) forms to event
+   */
+  document.on('submit', navigationListener);
 
   /*
-   * we do not call onRoute() directly because it is used in callClose
+   * [1] we do not call onRoute() directly because it is used in callClose
    * in order to prevent the back button on navigator:
    * the hash changes, but it is refused by this module (not trusted behavior)
    * so we need to call this function with a "virtual hash" as argument
+   * [2] window.on(...) seems buggy
    */
-  if(opts.useHash) window.on('hashchange', onRoute);
+  if(opts.useHash) window.addEventListener('hashchange', onRoute);
 
   document.on('backbutton', function() {
-    var pObj = getLastPage();
-    if(currentPage === opts.defaultPage) {
-      return;
-    }
-
-    callClose(currentPage, pObj.page, opts.hashPrefix + pObj.page + '/' + pObj.params);
+    var last = getLastPage();
+    callClose(currentPage, last.page, opts.hashPrefix + last.page + '/' + last.params);
   });
 
-
   phonon.navigator = function(options) {
-
     if(typeof options === 'object') {
       init(options);
     }
 
     return {
+
       currentPage: currentPage,
+      previousPage: previousPage,
       start: start,
       changePage: function(pageName, pageParams) {
         safeLink = true;
@@ -1854,18 +2188,44 @@ phonon.tagManager = (function () {
         if(typeof options.readyDelay !== 'undefined' && typeof options.readyDelay !== 'number') {
           throw new Error('readyDelay option must be a number');
         }
-
-        var p = getPageObject(options.page);
-
-        if(p) {
-          p.activity = (typeof callback === 'function' ? new Activity() : null);
-          p.callback = callback;
-          p.async = (typeof options.preventClose === 'boolean' ? options.preventClose : false);
-          p.content = (typeof options.content === 'string' ? options.content : null);
-          p.readyDelay = (typeof options.readyDelay === 'number' ? options.readyDelay : 1);
-        } else {
-          throw new Error('A namespace for  ' + options.page + ' is detected, but the DOM node <' + options.page + '> is not found.');
+        if(typeof options.content !== null && typeof opts.defaultTemplateExtension === 'string') {
+            options.content = options.page + '.' + opts.defaultTemplateExtension;
         }
+
+        // vuejs, riotjs support
+        var page = getPageObject(options.page);
+        var exists = page === null ? false : true;
+        if(!exists) {
+            page = createPage(options.page);
+        }
+
+        if(typeof callback === 'function' || typeof callback === 'object') {
+          page.activity = new Activity(callback);
+        } else {
+          page.activity = null;
+        }
+
+        page.callback = callback;
+        page.async = (typeof options.preventClose === 'boolean' ? options.preventClose : false);
+        page.content = (typeof options.content === 'string' ? options.content : null);
+        page.readyDelay = (typeof options.readyDelay === 'number' ? options.readyDelay : 1);
+
+        createOrUpdatePage(options.page.toLowerCase(), page);
+      },
+      // register a page event only such as home:create
+      onPage: function (pageName) {
+          if (typeof pageName !== 'string'){
+              throw new Error('PageName must be a string');
+          }
+
+          createOrUpdatePage(pageName, {});
+
+          return {
+              addEvent: function (eventName, callback) {
+                  var page = getPageObject(pageName);
+                  page.callbackRegistered.push({event: eventName, callback: callback});
+              }
+          }
       },
       callCallback: callCallback
     };
@@ -1874,380 +2234,1004 @@ phonon.tagManager = (function () {
 })(typeof window !== 'undefined' ? window : this, typeof riot !== 'undefined' ? riot : undefined, phonon);
 
 /* ========================================================================
- * Phonon: dialogs.js v0.0.5
+* Phonon: accordion.js v0.0.1
+* http://phonon.quarkdev.com
+* ========================================================================
+* Licensed under MIT (http://phonon.quarkdev.com)
+* ======================================================================== */
+;(function (window) {
+
+	'use strict';
+
+	/**
+	 * Show the accordion content
+	 * @param {DOMNode} defaultTarget
+	 * @param {DOMNode} accordionContent
+	 */
+	function show(defaultTarget, accordionContent) {
+
+		var height = accordionContent.offsetHeight;
+		accordionContent.style.maxHeight = '0px';
+
+		window.setTimeout(function() {
+
+			var onShow = function() {
+
+				accordionContent.off(phonon.event.transitionEnd, onShow);
+
+				var icon = defaultTarget.parentNode.querySelector('.icon-expand-more');
+
+				if(icon) {
+					icon.classList.remove('icon-expand-more');
+					icon.classList.add('icon-expand-less');
+				}
+
+			};
+
+			accordionContent.on(phonon.event.transitionEnd, onShow);
+
+			accordionContent.style.maxHeight = height + 'px';
+			accordionContent.classList.add('accordion-active');
+
+		}, 100);
+	}
+
+	/**
+	 * Hide the accordion content
+	 * @param {DOMNode} defaultTarget
+	 * @param {DOMNode} accordionContent
+	 */
+		function hide(defaultTarget, accordionContent) {
+
+		var onHide = function() {
+
+			accordionContent.classList.remove('accordion-active');
+			accordionContent.style.maxHeight = 'none';
+
+			var icon = defaultTarget.parentNode.querySelector('.icon-expand-less');
+
+			if(icon) {
+				icon.classList.remove('icon-expand-less');
+				icon.classList.add('icon-expand-more');
+			}
+
+			accordionContent.off(phonon.event.transitionEnd, onHide);
+		};
+
+		accordionContent.style.maxHeight = '0px';
+		accordionContent.on(phonon.event.transitionEnd, onHide);
+	}
+
+	// fix #96
+	function getAccordion(target) {
+
+		for (; target && target !== document; target = target.parentNode) {
+			if(target.nextElementSibling && target.nextElementSibling.classList.contains('accordion-content')) {
+				return {defaultTarget: target, accordionContent: target.nextElementSibling}
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 *
+	 */
+	function fromPage(target) {
+
+		for (; target && target !== document; target = target.parentNode) {
+			if(target.getAttribute('data-page') === 'true') return true;
+		}
+
+		return false;
+	}
+
+	function onPage(evt) {
+
+		var target = getAccordion(evt.target)
+		if(target === null) return
+
+		if(target.accordionContent.classList.contains('accordion-active')) {
+			hide(target.defaultTarget, target.accordionContent);
+		} else {
+			show(target.defaultTarget, target.accordionContent);
+		}
+	}
+
+	/*
+	 * Attachs event once
+	 */
+	document.on('pagecreated', function(evt) {
+
+		var page = document.querySelector(evt.detail.page);
+
+		/*
+		 * Accordion lists are in:
+		 * [1] pages
+		 * [2] components such as side panels are found when Phonon is ready
+		 */
+
+		// 1
+		var lists = page.querySelectorAll('.list');
+		if(lists) {
+			var i = 0;
+			var l = lists.length;
+			for (; i < l; i++) {
+				var list = lists[i];
+				if(list.querySelector('.accordion-content')) {
+					list.on('tap', onPage);
+				}
+			}
+		}
+	});
+
+	document.on('pageclosed', function(evt) {
+
+		var page = document.querySelector(evt.detail.page);
+		var accordionLists = page.querySelectorAll('.accordion-active');
+		var l = accordionLists.length;
+		var i = 0;
+
+		for (; i < accordionLists.length; i++) {
+			var fakeDefaultTarget = accordionLists[i].previousElementSibling;
+			onPage({target: fakeDefaultTarget});
+		}
+	});
+
+	phonon.onReady(function() {
+
+		// 2
+		var lists = document.body.querySelectorAll('.list')
+		if(lists) {
+			var i = 0;
+			var l = lists.length;
+			for (; i < l; i++) {
+				var list = lists[i];
+				if(list.querySelector('.accordion-content') && !fromPage(list)) {
+					list.on('tap', onPage);
+				}
+			}
+		}
+	});
+
+}(typeof window !== 'undefined' ? window : this));
+
+/**
+* Simple, lightweight, usable local autocomplete library for modern browsers
+* Because there weren’t enough autocomplete scripts in the world? Because I’m completely insane and have NIH syndrome? Probably both. :P
+* @author Lea Verou http://leaverou.github.io/awesomplete
+* MIT license
+*/
+
+(function () {
+
+	var _ = function (input, o) {
+		var me = this;
+
+		// Setup
+
+		this.input = $(input);
+		this.input.setAttribute("autocomplete", "off");
+		this.input.setAttribute("aria-autocomplete", "list");
+
+		o = o || {};
+
+		configure.call(this, {
+			minChars: 2,
+			maxItems: 10,
+			autoFirst: false,
+			filter: _.FILTER_CONTAINS,
+			sort: _.SORT_BYLENGTH,
+			item: function (text, input) {
+				var html = input === '' ? text : text.replace(RegExp($.regExpEscape(input.trim()), "gi"), "<mark>$&</mark>");
+				return $.create("li", {
+					innerHTML: html,
+					"aria-selected": "false"
+				});
+			},
+			replace: function (text) {
+				this.input.value = text;
+			}
+		}, o);
+
+		this.index = -1;
+
+		// Create necessary elements
+
+		this.container = $.create("div", {
+			className: "awesomplete",
+			around: input
+		});
+
+		// @phonon add class list
+		this.ul = $.create("ul", {
+			className: "list",
+			hidden: "hidden",
+			inside: this.container
+		});
+
+		this.status = $.create("span", {
+			className: "visually-hidden",
+			role: "status",
+			"aria-live": "assertive",
+			"aria-relevant": "additions",
+			inside: this.container
+		});
+
+		// Bind events
+
+		$.bind(this.input, {
+			"input": this.evaluate.bind(this),
+			"blur": this.close.bind(this),
+			"keydown": function(evt) {
+				var c = evt.keyCode;
+
+				// If the dropdown `ul` is in view, then act on keydown for the following keys:
+				// Enter / Esc / Up / Down
+				if(me.opened) {
+					if (c === 13 && me.selected) { // Enter
+						evt.preventDefault();
+						me.select();
+					}
+					else if (c === 27) { // Esc
+						me.close();
+					}
+					else if (c === 38 || c === 40) { // Down/Up arrow
+						evt.preventDefault();
+						me[c === 38? "previous" : "next"]();
+					}
+				}
+			}
+		});
+
+		$.bind(this.input.form, {"submit": this.close.bind(this)});
+
+		$.bind(this.ul, {"mousedown": function(evt) {
+			var li = evt.target;
+
+			if (li !== this) {
+
+				while (li && !/li/i.test(li.nodeName)) {
+					li = li.parentNode;
+				}
+
+				if (li && evt.button === 0) {  // Only select on left click
+					me.select(li, evt);
+				}
+			}
+		}});
+
+		if (this.input.hasAttribute("list")) {
+			this.list = "#" + this.input.getAttribute("list");
+			this.input.removeAttribute("list");
+		}
+		else {
+			this.list = this.input.getAttribute("data-list") || o.list || [];
+		}
+
+		_.all.push(this);
+	};
+
+	_.prototype = {
+		set list(list) {
+			if (Array.isArray(list)) {
+				this._list = list;
+			}
+			else if (typeof list === "string" && list.indexOf(",") > -1) {
+				this._list = list.split(/\s*,\s*/);
+			}
+			else { // Element or CSS selector
+				list = $(list);
+
+				if (list && list.children) {
+					this._list = slice.apply(list.children).map(function (el) {
+						return el.textContent.trim();
+					});
+				}
+			}
+
+			if (document.activeElement === this.input) {
+				this.evaluate();
+			}
+		},
+
+		get selected() {
+			return this.index > -1;
+		},
+
+		get opened() {
+			return this.ul && this.ul.getAttribute("hidden") == null;
+		},
+
+		close: function () {
+			this.ul.setAttribute("hidden", "");
+			this.index = -1;
+
+			$.fire(this.input, "awesomplete-close");
+		},
+
+		open: function () {
+			this.ul.removeAttribute("hidden");
+
+			if (this.autoFirst && this.index === -1) {
+				this.goto(0);
+			}
+
+			$.fire(this.input, "awesomplete-open");
+		},
+
+		next: function () {
+			var count = this.ul.children.length;
+
+			this.goto(this.index < count - 1? this.index + 1 : -1);
+		},
+
+		previous: function () {
+			var count = this.ul.children.length;
+
+			this.goto(this.selected? this.index - 1 : count - 1);
+		},
+
+		// Should not be used, highlights specific item without any checks!
+		goto: function (i) {
+			var lis = this.ul.children;
+
+			if (this.selected) {
+				lis[this.index].setAttribute("aria-selected", "false");
+			}
+
+			this.index = i;
+
+			if (i > -1 && lis.length > 0) {
+				lis[i].setAttribute("aria-selected", "true");
+				this.status.textContent = lis[i].textContent;
+			}
+
+			$.fire(this.input, "awesomplete-highlight");
+		},
+
+		select: function (selected, originalEvent) {
+			selected = selected || this.ul.children[this.index];
+
+			if (selected) {
+				var prevented;
+
+				$.fire(this.input, "awesomplete-select", {
+					text: selected.textContent,
+					preventDefault: function () {
+						prevented = true;
+					},
+					originalEvent: originalEvent
+				});
+
+				if (!prevented) {
+					this.replace(selected.textContent);
+					this.close();
+					$.fire(this.input, "awesomplete-selectcomplete");
+				}
+			}
+		},
+
+		evaluate: function() {
+			var me = this;
+			var value = this.input.value;
+
+			if (value.length >= this.minChars && this._list.length > 0) {
+				this.index = -1;
+				// Populate list with options that match
+				this.ul.innerHTML = "";
+
+				this._list
+				.filter(function(item) {
+					return me.filter(item, value);
+				})
+				.sort(this.sort)
+				.every(function(text, i) {
+					me.ul.appendChild(me.item(text, value));
+
+					return i < me.maxItems - 1;
+				});
+
+				if (this.ul.children.length === 0) {
+					this.close();
+				} else {
+					this.open();
+				}
+			}
+			else {
+				this.close();
+			}
+		}
+	};
+
+	// Static methods/properties
+
+	_.all = [];
+
+	_.FILTER_CONTAINS = function (text, input) {
+		return RegExp($.regExpEscape(input.trim()), "i").test(text);
+	};
+
+	_.FILTER_STARTSWITH = function (text, input) {
+		return RegExp("^" + $.regExpEscape(input.trim()), "i").test(text);
+	};
+
+	_.SORT_BYLENGTH = function (a, b) {
+		if (a.length !== b.length) {
+			return a.length - b.length;
+		}
+
+		return a < b? -1 : 1;
+	};
+
+	// Private functions
+
+	function configure(properties, o) {
+		for (var i in properties) {
+			var initial = properties[i],
+			attrValue = this.input.getAttribute("data-" + i.toLowerCase());
+
+			if (typeof initial === "number") {
+				this[i] = parseInt(attrValue);
+			}
+			else if (initial === false) { // Boolean options must be false by default anyway
+				this[i] = attrValue !== null;
+			}
+			else if (initial instanceof Function) {
+				this[i] = null;
+			}
+			else {
+				this[i] = attrValue;
+			}
+
+			if (!this[i] && this[i] !== 0) {
+				this[i] = (i in o)? o[i] : initial;
+			}
+		}
+	}
+
+	// Helpers
+
+	var slice = Array.prototype.slice;
+
+	function $(expr, con) {
+		return typeof expr === "string"? (con || document).querySelector(expr) : expr || null;
+	}
+
+	function $$(expr, con) {
+		return slice.call((con || document).querySelectorAll(expr));
+	}
+
+	$.create = function(tag, o) {
+		var element = document.createElement(tag);
+
+		for (var i in o) {
+			var val = o[i];
+
+			if (i === "inside") {
+				$(val).appendChild(element);
+			}
+			else if (i === "around") {
+				var ref = $(val);
+				ref.parentNode.insertBefore(element, ref);
+				element.appendChild(ref);
+			}
+			else if (i in element) {
+				element[i] = val;
+			}
+			else {
+				element.setAttribute(i, val);
+			}
+		}
+
+		return element;
+	};
+
+	$.bind = function(element, o) {
+		if (element) {
+			for (var event in o) {
+				var callback = o[event];
+
+				event.split(/\s+/).forEach(function (event) {
+					element.addEventListener(event, callback);
+				});
+			}
+		}
+	};
+
+	$.fire = function(target, type, properties) {
+		var evt = document.createEvent("HTMLEvents");
+
+		evt.initEvent(type, true, true );
+
+		for (var j in properties) {
+			evt[j] = properties[j];
+		}
+
+		target.dispatchEvent(evt);
+	};
+
+	$.regExpEscape = function (s) {
+		return s.replace(/[-\\^$*+?.()|[\]{}]/g, "\\$&");
+	}
+
+	// Initialization
+
+	function init() {
+		$$("input.awesomplete").forEach(function (input) {
+			new _(input);
+		});
+	}
+
+	// Are we in a browser? Check for Document constructor
+	if (typeof Document !== "undefined") {
+		// DOM already loaded?
+		if (document.readyState !== "loading") {
+			init();
+		}
+		else {
+			// Wait for it
+			document.addEventListener("DOMContentLoaded", init);
+		}
+	}
+
+	_.$ = $;
+	_.$$ = $$;
+
+	// Make sure to export Awesomplete on self when in a browser
+	if (typeof self !== "undefined") {
+		self.Awesomplete = _;
+	}
+
+	// Expose Awesomplete as a CJS module
+	if (typeof module === "object" && module.exports) {
+		module.exports = _;
+	}
+
+	return _;
+
+}());
+
+
+
+
+
+/* ========================================================================
+* Phonon: autocomplete.js v0.1.0
+* http://phonon.quarkdev.com
+* ========================================================================
+* Licensed under MIT (http://phonon.quarkdev.com)
+* ======================================================================== */
+;(function (window, phonon) {
+
+	'use strict';
+
+	/**
+	* For every mounted page, initizalize autocomplete
+	*/
+
+	phonon.autocomplete = function( input, object ){
+		new Awesomplete( input, object );
+	};
+
+
+}(typeof window !== 'undefined' ? window : this, window.phonon || {}));
+
+/* ========================================================================
+ * Phonon: dialogs.js v0.0.6
  * http://phonon.quarkdev.com
  * ========================================================================
  * Licensed under MIT (http://phonon.quarkdev.com)
  * ======================================================================== */
 ;(function (window, phonon) {
 
-  'use strict';
-
-  var lastTrigger = false;
-  var dialogs = [];
-
-  var createBackdrop = function (id) {
-    var backdrop = document.createElement('div');
-    backdrop.setAttribute('data-id', id);
-    backdrop.classList.add('backdrop-dialog');
-    return backdrop;
-  };
-
-  var findTrigger = function (target) {
-    var triggers = document.querySelectorAll('[data-dialog-id], [data-dialog-close]'), i;
-    for (; target && target !== document; target = target.parentNode) {
-      for (i = triggers.length; i--;) {
-        if (triggers[i] === target) {
-          return target;
-        }
-      }
-    }
-  };
-
-  var getDialog = function (event) {
-    var dialogToggle = findTrigger(event.target);
-    if (dialogToggle) {
-      var dialogId = dialogToggle.getAttribute('data-dialog-id');
-      if(dialogId) {
-        return document.querySelector('#'+dialogId);
-      } else {
-        return findDialog(event.target);
-      }
-    }
-  };
-
-  var findDialog = function (target) {
-    var dialogs = document.querySelectorAll('.dialog'), i;
-
-    for (; target && target !== document; target = target.parentNode) {
-      for (i = dialogs.length; i--;) {
-        if (dialogs[i] === target && target.classList.contains('active')) {
-          return target;
-        }
-      }
-    }
-  };
-
-  var findDialogObject = function(id) {
-
-    var i = dialogs.length - 1;
-    for (; i >= 0; i--) {
-      if(dialogs[i].dialog.id === id) {
-        var d = dialogs[i];
-        d.index = i;
-        return d;
-      }
-    }
-    return false;
-  };
-
-  var buildDialog = function (type, text, title, cancelable) {
-    text = (typeof text === 'string' ? '<p>'+text+'</p>' : '');
-    var noTitle = typeof title;
-    title = (noTitle === 'string' ? title : type);
-    cancelable = (typeof cancelable === 'boolean' ? cancelable : true);
-
-    var div = document.createElement('div');
-    div.setAttribute('class', 'dialog');
-    div.setAttribute('data-cancelable', cancelable);
-    div.id = 'auto-gen-' + type;
-
-    var nodeTitle = (noTitle === undefined ? '' : '<h3>'+title+'</h3>');
-    var nodeCancelable = (cancelable ? 'data-dialog-close="true"' : '');
-    var btnCancel = '<li><a class="btn btn-flat btn-cancel" '+nodeCancelable+' >Cancel</a></li>';
-    var input = '';
-    var indicator = '';
-
-    if(type === 'alert') {
-      btnCancel = '';
-    } else if(type === 'prompt') {
-      input = '<input type="text" placeholder="Value">';
-    } else if(type === 'indicator') {
-      text = '';
-      indicator = '<div class="circle-progress active padded-bottom"><div class="spinner"></div></div>';
-    }
-
-    var actions = (type === 'indicator' ? '' : '<ul class="buttons">'+
-              btnCancel+
-              '<li><a class="btn btn-flat primary btn-confirm" data-dialog-close="true">OK</a></li>'+
-          '</ul>');
-
-    var alert = '<div class="content">' +
-              '<div class="padded-full">' +
-                  nodeTitle +
-                  text +
-                  input +
-                  indicator +
-              '</div>'+
-          '</div>'+
-          actions;
-
-    div.innerHTML = alert;
+	'use strict';
+
+	var lastTrigger = false;
+	var dialogs = [];
+	var fireEvent = null;
+
+	function addCancelCallback(dialog, cancelCallback) {
+		for (var i = 0; i < dialogs.length; i++) {
+			if(dialogs[i].dialog === dialog) {
+				dialogs[i].cancelCallback = cancelCallback;
+				break;
+			}
+		}
+	}
+
+	var createBackdrop = function (id) {
+		var backdrop = document.createElement('div');
+		backdrop.setAttribute('data-id', id);
+		backdrop.classList.add('backdrop-dialog');
+		return backdrop;
+	};
+
+	var findTrigger = function (target) {
+		var triggers = document.querySelectorAll('[data-dialog-id], [data-dialog-close]'), i;
+		for (; target && target !== document; target = target.parentNode) {
+			for (i = triggers.length; i--;) {
+				if (triggers[i] === target) {
+					return target;
+				}
+			}
+		}
+	};
+
+	var getDialog = function (event) {
+		var dialogToggle = findTrigger(event.target);
+		if (dialogToggle) {
+			var dialogId = dialogToggle.getAttribute('data-dialog-id');
+			if(dialogId) {
+				return document.querySelector('#'+dialogId);
+			} else {
+				return findDialog(event.target);
+			}
+		}
+	};
+
+	var findDialog = function (target) {
+		var dialogs = document.querySelectorAll('.dialog'), i;
+
+		for (; target && target !== document; target = target.parentNode) {
+			for (i = dialogs.length; i--;) {
+				if (dialogs[i] === target && target.classList.contains('active')) {
+					return target;
+				}
+			}
+		}
+	};
+
+	var findDialogObject = function(id) {
+
+		var i = dialogs.length - 1;
+		for (; i >= 0; i--) {
+			if(dialogs[i].dialog.id === id) {
+				var d = dialogs[i];
+				d.index = i;
+				return d;
+			}
+		}
+		return false;
+	};
+
+	var buildDialog = function (type, text, title, cancelable, textOk, textCancel) {
+		text = (typeof text === 'string' ? '<p>' + text + '</p>' : '');
+		var noTitle = typeof title;
+		title = (noTitle === 'string' ? title : type);
+		cancelable = (typeof cancelable === 'boolean' ? cancelable : true);
+		textOk = (typeof textOk === 'string' ? textOk : 'Ok');
+		textCancel = (typeof textCancel === 'string' ? textCancel : 'Cancel');
+
+		var id = 'auto-gen-' + type;
+
+		var div = document.createElement('div');
+		div.setAttribute('class', 'dialog');
+		div.setAttribute('data-cancelable', cancelable);
+		div.id = id;
+
+		var nodeTitle = (noTitle === undefined ? '' : '<h3>'+title+'</h3>');
+		var btnCancel = '<li><a class="btn btn-flat btn-cancel" data-dialog-close="true">' + textCancel + '</a></li>';
+		var input = '';
+		var indicator = '';
+
+		if(type === 'alert') {
+			btnCancel = '';
+		} else if(type === 'prompt') {
+			input = '<input type="text" placeholder="Value">';
+		} else if(type === 'indicator') {
+			text = '';
+			indicator = '<div class="circle-progress active padded-bottom"><div class="spinner"></div></div>';
+		}
+
+		var actions = (type === 'indicator' ? '' : '<ul class="buttons">' +
+			btnCancel +
+			'<li><a class="btn btn-flat primary btn-confirm" data-dialog-close="true">' + textOk + '</a></li>' +
+		'</ul>');
 
-    document.body.appendChild(div);
+		var alert = '<div class="content">' +
+			'<div class="padded-full">' +
+				nodeTitle +
+				text +
+				input +
+				indicator +
+			'</div>'+
+		'</div>' + actions;
 
-    return div;
-  };
+		div.innerHTML = alert;
 
-  
-  document.on(phonon.event.start, function (evt) {
+		document.body.appendChild(div);
 
-    if(dialogs.length > 0) {
-      var previousDialog = dialogs[dialogs.length - 1].dialog, p = findDialog(evt.target);
+		return div;
+	};
 
-      if (!p) {
-        if(previousDialog.getAttribute('data-cancelable') !== 'false') {
 
-          // close the previous active dialog
-          close(previousDialog);
-          
-          // dispatch the cancel event
-          var evt = new CustomEvent('cancel', {
-            detail: { target: previousDialog },
-            bubbles: true,
-            cancelable: true
-          });
-          previousDialog.dispatchEvent(evt);
-        }
-      }
+	document.on(phonon.event.start, function (evt) {
 
-      if (p && p !== previousDialog) {
-        // Case where there are two active dialogs
-        if (p.id !== previousDialog.id) {
-          close(previousDialog);
-        }
-      } 
-    }
-  });
+		if(dialogs.length > 0) {
+			var previous = dialogs[dialogs.length - 1], p = findDialog(evt.target);
 
-  document.on('tap', function (evt) {
+			if (!p) {
+				if(previous.dialog.getAttribute('data-cancelable') !== 'false') {
 
-    var trigger = findTrigger(evt.target), dialog = null;
+					// close the previous active dialog
+					close(previous.dialog);
 
-    if (trigger) {
-      dialog = getDialog(evt);
+					// call the cancel callback
+					if(typeof previous.cancelCallback === 'function') previous.cancelCallback();
+				}
+			}
 
-      lastTrigger = trigger;
+			if (p && p !== previous.dialog) {
+				// Case where there are two active dialogs
+				if (p.id !== previous.dialog.id) {
+					close(previous.dialog);
+				}
+			}
+		}
+	});
 
-      if(dialog) {
+	document.on('tap', function(evt) {
 
-        if(dialog.classList.contains('active')) {
-          close(dialog);
-        } else {
-          open(dialog);
-        }
+		var trigger = findTrigger(evt.target), dialog = null;
 
-        if(!lastTrigger.classList.contains('btn-confirm') && !lastTrigger.classList.contains('btn-cancel')) return;
+		if (trigger) {
+			dialog = getDialog(evt);
 
-        var eventName = (lastTrigger.classList.contains('btn-confirm') ? 'confirm' : 'cancel');
-        var input = dialog.querySelector('input');
-        var inputValue = undefined;
+			lastTrigger = trigger;
 
-        if(input) inputValue = input.value;
+			if(dialog) {
 
-        // dispatch event
-        var evt = new CustomEvent(eventName, {
-          detail: { inputValue: inputValue, target: dialog },
-          bubbles: true,
-          cancelable: true
-        });
-        dialog.dispatchEvent(evt);
-      }
-    }
-  });
+				if(dialog.classList.contains('active')) {
+					close(dialog);
+				} else {
+					open(dialog);
+				}
+			}
+		}
+	});
 
-  function onHide() {
+	document.on('keypress', function(evt) {
 
-    var obj = findDialogObject(this.getAttribute('data-id'));
-    var backdrop = obj.backdrop;
+		if(dialogs.length > 0) {
 
-    backdrop.classList.remove('fadeout');
-    document.body.removeChild(backdrop);
+			if(evt.which == 13 || evt.keyCode == 13) {
+				var previous = dialogs[dialogs.length - 1];
+				close(previous.dialog);
 
-    var dialog = obj.dialog;
-    dialog.style.visibility = 'hidden';
-    dialog.classList.remove('close');
+				return false;
+			}
+		}
 
-    dialogs.splice(obj.index, 1);
+		return true;
+	});
 
-    this.off(phonon.event.transitionEnd, onHide, false);
-  }
+	function onHide() {
 
-  function center (target) {
+		var obj = findDialogObject(this.getAttribute('data-id'));
+		var backdrop = obj.backdrop;
 
-    var computedStyle = getComputedStyle(target),
-    width = computedStyle.width,
-    height = computedStyle.height;
+		backdrop.classList.remove('fadeout');
+		document.body.removeChild(backdrop);
 
-    width = width.slice(0, width.length - 2);
-    height = height.slice(0, height.length - 2);
+		var dialog = obj.dialog;
+		dialog.style.visibility = 'hidden';
+		dialog.style.display = 'none';
 
-    var top = (window.innerHeight / 2) - (height / 2);
-    target.style.top = top + 'px';
-  }
+		dialog.classList.remove('close');
 
-  function open (dialog) {
+		dialogs.splice(obj.index, 1);
 
-    dialog.style.visibility = 'visible';
+		this.off(phonon.event.transitionEnd, onHide, false);
+	}
 
-    if(!dialog.classList.contains('active')) {
+	function center (target) {
 
-      center(dialog);
+		var computedStyle = getComputedStyle(target),
+		width = computedStyle.width,
+		height = computedStyle.height;
 
-      dialog.classList.add('active');
+		width = width.slice(0, width.length - 2);
+		height = height.slice(0, height.length - 2);
 
-      var preloader = dialog.querySelector('.circle-progress');
+		var top = (window.innerHeight / 2) - (height / 2);
+		target.style.top = top + 'px';
+	}
 
-      if(preloader) phonon.preloader(preloader).show();
-
-      var backdrop = createBackdrop(dialog.id);
-
-      dialogs.push( {dialog: dialog, backdrop: backdrop} );
-
-      document.body.appendChild(backdrop);
-    }
-  }
-
-  function close(dialog) {
-
-    if(dialog.classList.contains('active')) {
-
-      dialog.classList.remove('active');
-      dialog.classList.add('close');
-
-      var preloader = dialog.querySelector('.circle-progress');
-      if(preloader) phonon.preloader(preloader).hide();
-
-      var obj = findDialogObject(dialog.id);
-
-      var backdrop = obj.backdrop;
-
-      backdrop.classList.add('fadeout');
-      backdrop.on(phonon.event.transitionEnd, onHide, false);
-    }
-  }
-
-  function on(dialog, eventName, callback) {
-
-    var fireEvent = function() {
-
-      var input = dialog.querySelector('input');
-      var inputValue = undefined;
-      if(input) {
-        inputValue = input.value;
-      }
-
-      callback(inputValue);
-      this.off('tap', fireEvent);
-    };
-
-    if(eventName === 'confirm') {
-      dialog.querySelector('.btn-confirm').on('tap', fireEvent);
-    } else {
-      var btnCancel = dialog.querySelector('.btn-cancel');
-      if(btnCancel !== null) {
-        btnCancel.on('tap', fireEvent);
-      }
-    }
-  }
-
-  phonon.dialog = function(el) {
-    if(typeof el === 'undefined') {
-
-      return {
-        closeActive: function() {
-          var closable = (dialogs.length > 0 ? true : false);
-
-          if(closable) {
-
-            var dialog = dialogs[dialogs.length - 1].dialog;
-            if(dialog.getAttribute('data-cancelable') !== 'false') {
-              close(dialog);
-            }
-          }
-          return closable;
-        },
-        alert: function(text, title, cancelable) {
-          var dialog = buildDialog('alert', text, title, cancelable);
-          open(dialog);
-          return {
-            on: function(eventName, callback) {
-              on(dialog, eventName, callback);
-            }
-          };
-        },
-        confirm: function(text, title, cancelable) {
-          var dialog = buildDialog('confirm', text, title, cancelable);
-          open(dialog);
-          return {
-            on: function(eventName, callback) {
-              on(dialog, eventName, callback);
-            }
-          };
-        },
-        prompt: function(text, title, cancelable) {
-          var dialog = buildDialog('prompt', text, title, cancelable);
-          open(dialog);
-          return {
-            on: function(eventName, callback) {
-              on(dialog, eventName, callback);
-            }
-          };
-        },
-        indicator: function(title, cancelable) {
-          var dialog = buildDialog('indicator', '', title, cancelable);
-          open(dialog);
-          return {
-            on: function(eventName, callback) {
-              on(dialog, eventName, callback, true);
-              return this;
-            },
-            open: function() {
-              open(dialog);
-              return this;
-            },
-            close: function() {
-              close(dialog);
-              return this;
-            }
-          };
-        }
-      }
-    }
-
-    var dialog = (typeof el === 'string' ? document.querySelector(el) : el);
-    if(dialog === null) {
-      throw new Error('The following element ' + el + ' does not exists');
-    }
-
-    return {
-      open: function() {
-        open(dialog);
-        return this;
-      },
-      close: function() {
-        close(dialog);
-        return this;
-      },
-      on: function(eventName, callback) {
-        on(dialog, eventName, callback);
-        return this;
-      },
-      isActive: function() {
-        return (dialog.classList.contains('active') ? true : false);
-      }
-    };
-  };
-
-  window.phonon = phonon;
-
-  if(typeof exports === 'object') {
-    module.exports = phonon.dialog;
-  } else if(typeof define === 'function' && define.amd) {
-    define(function() { return phonon.dialog });
-  }
+	function open (dialog) {
+		dialog.style.visibility = 'visible';
+		dialog.style.display = 'block';
+
+		if(!dialog.classList.contains('active')) {
+
+			center(dialog);
+
+			dialog.classList.add('active');
+
+			var preloader = dialog.querySelector('.circle-progress');
+
+			if(preloader) phonon.preloader(preloader).show();
+
+			var backdrop = createBackdrop(dialog.id);
+			dialogs.push( {dialog: dialog, backdrop: backdrop} );
+
+			document.body.appendChild(backdrop);
+		}
+	}
+
+	function close(dialog) {
+
+		off(dialog)
+
+		if(dialog.classList.contains('active')) {
+
+			dialog.classList.remove('active');
+			dialog.classList.add('close');
+
+			var preloader = dialog.querySelector('.circle-progress');
+			if(preloader) phonon.preloader(preloader).hide();
+
+			var obj = findDialogObject(dialog.id);
+
+			var backdrop = obj.backdrop;
+
+			backdrop.on(phonon.event.transitionEnd, onHide, false);
+
+			// fix issue #62
+			window.setTimeout(function() {
+				backdrop.classList.add('fadeout');
+			}, 1);
+		}
+	}
+
+	function on(dialog, eventName, callback) {
+
+		fireEvent = function() {
+
+			var input = dialog.querySelector('input');
+			var inputValue; // undefined by default
+			if(input) {
+				inputValue = input.value;
+			}
+
+			callback(inputValue);
+		};
+
+		if(eventName === 'confirm') {
+			var btnConfirm = dialog.querySelector('.btn-confirm');
+			if(btnConfirm) {
+				btnConfirm.on('tap', fireEvent);
+			}
+		} else {
+
+			// keep cancel callback for backdrop taps
+			addCancelCallback(dialog, callback);
+
+			var btnCancel = dialog.querySelector('.btn-cancel');
+			if(btnCancel) {
+				btnCancel.on('tap', fireEvent);
+			}
+		}
+	}
+
+	/**
+	 * Resets tap events when the dialog is closed
+	 */
+	function off(dialog) {
+
+		if(typeof fireEvent !== 'function') return;
+
+		var buttons = dialog.querySelectorAll('.btn-confirm, .btn-cancel');
+		if(buttons) {
+			var i = 0;
+			var l = buttons.length;
+			for (; i < l; i++) {
+				buttons[i].off('tap', fireEvent)
+			}
+		}
+	}
+
+	function closeActive() {
+		var closable = (dialogs.length > 0 ? true : false);
+		if(closable) {
+			var dialog = dialogs[dialogs.length - 1].dialog;
+			if(dialog.getAttribute('data-cancelable') !== 'false') {
+				close(dialog);
+			}
+		}
+		return closable;
+	}
+
+	phonon.dialog = function(el) {
+
+		if(typeof el === 'undefined') {
+			return {
+				alert: function(text, title, cancelable, textOk) {
+					var dialog = buildDialog('alert', text, title, cancelable, textOk);
+					open(dialog);
+					return {
+						on: function(eventName, callback) {
+							on(dialog, eventName, callback);
+						}
+					};
+				},
+				confirm: function(text, title, cancelable, textOk, textCancel) {
+					var dialog = buildDialog('confirm', text, title, cancelable, textOk, textCancel);
+					open(dialog);
+					return {
+						on: function(eventName, callback) {
+							on(dialog, eventName, callback);
+						}
+					};
+				},
+				prompt: function(text, title, cancelable, textOk, textCancel) {
+					var dialog = buildDialog('prompt', text, title, cancelable, textOk, textCancel);
+					open(dialog);
+					return {
+						on: function(eventName, callback) {
+							on(dialog, eventName, callback);
+						}
+					};
+				},
+				indicator: function(title, cancelable) {
+					var dialog = buildDialog('indicator', '', title, cancelable);
+					open(dialog);
+					return {
+						on: function(eventName, callback) {
+							on(dialog, eventName, callback);
+							return this;
+						},
+						open: function() {
+							open(dialog);
+							return this;
+						},
+						close: function() {
+							close(dialog);
+							return this;
+						}
+					};
+				}
+			}
+		}
+
+		var dialog = (typeof el === 'string' ? document.querySelector(el) : el);
+		if(dialog === null) {
+			throw new Error('The following element ' + el + ' does not exists');
+		}
+
+		return {
+			open: function() {
+				open(dialog);
+				return this;
+			},
+			close: function() {
+				close(dialog);
+				return this;
+			},
+			on: function(eventName, callback) {
+				on(dialog, eventName, callback);
+				return this;
+			},
+			isActive: function() {
+				return (dialog.classList.contains('active') ? true : false);
+			}
+		};
+	};
+
+	phonon.dialogUtil = {
+		closeActive: closeActive
+	};
+
+	window.phonon = phonon;
+
+	if(typeof exports === 'object') {
+		module.exports = phonon.dialog;
+	} else if(typeof define === 'function' && define.amd) {
+		define(function() { return phonon.dialog });
+	}
 
 }(typeof window !== 'undefined' ? window : this, window.phonon || {}));
+
 /* ========================================================================
  * Phonon: floating-actions.js v0.0.5
  * http://phonon.quarkdev.com
@@ -2365,6 +3349,12 @@ phonon.tagManager = (function () {
 		var inputs = page.querySelectorAll('input.with-label'), i = inputs.length - 1;
 		for (; i >= 0; i--) {
 			addListener(inputs[i]);
+
+			/*
+			 * Do this once at start also, otherwise pre-populated inputs
+			 * will have labels directly overlapping on top of the input value on page load.
+			*/
+			isInputFilled(inputs[i]);
 		}
 	});
 
@@ -2380,206 +3370,249 @@ phonon.tagManager = (function () {
 	});
 
 }(typeof window !== 'undefined' ? window : this));
+
 /* ========================================================================
- * Phonon: notifications.js v0.0.2
- * http://phonon.quarkdev.com
- * ========================================================================
- * Licensed under MIT (http://phonon.quarkdev.com)
- * ======================================================================== */
+* Phonon: notifications.js v0.0.2
+* http://phonon.quarkdev.com
+* ========================================================================
+* Licensed under MIT (http://phonon.quarkdev.com)
+* ======================================================================== */
 ;(function (window, phonon) {
 
-	'use strict';
+	'use strict'
 
-	var notifs = [];
+	var notifs = []
 
 	function onShow() {
+		var self = this
 
-		var self = this;
-
-		var timeout = self.getAttribute('data-timeout');
+		var timeout = self.getAttribute('data-timeout')
 		if(timeout) {
 
 			if(isNaN(parseInt(timeout))) {
-				console.error('Attribute data-timeout must be a number');
-			} else {
+				console.error('Attribute data-timeout must be a number')
+				return
+			}
 
-				var progress = self.querySelector('.progress');
+			var progress = self.querySelector('.progress')
 
-				if(progress) {
+			if(progress) {
 
-					if(!progress.classList.contains('active')) {
-						progress.classList.add('active');
-					}
-
-					var progressBar = progress.querySelector('.determinate');
-
-					progressBar.style.width = '0';
-					progressBar.style.transitionDuration = timeout + 'ms';
-
-					window.setTimeout(function() {
-						progressBar.style.width = '100%';
-					}, 1);
+				if(!progress.classList.contains('active')) {
+					progress.classList.add('active')
 				}
 
+				var progressBar = progress.querySelector('.determinate')
+
+				progressBar.style.width = '0'
+
+				progressBar.style.webkitTransitionDuration = timeout + 'ms'
+				progressBar.style.MozTransitionDuration = timeout + 'ms'
+				progressBar.style.msTransitionDuration = timeout + 'ms'
+				progressBar.style.OTransitionDuration = timeout + 'ms'
+				progressBar.style.transitionDuration = timeout + 'ms'
+
 				window.setTimeout(function() {
-					hide(self);
-				}, timeout);
+					progressBar.style.width = '100%'
+				}, 10)
 			}
+
+			window.setTimeout(function() {
+				hide(self);
+			}, parseInt(timeout) + 10);
 		}
 
-		self.off(phonon.event.transitionEnd, onShow, false);
+		self.off(phonon.event.transitionEnd, onShow, false)
 	}
 
 	function onHide() {
-
-		var self = this;
+		var self = this
 
 		// reset
-		self.style.zIndex = 18;
-		
-		var height = self.clientHeight;
+		self.style.zIndex = 28
+
+		var height = self.clientHeight
 
 		// for the notif
-		self.style.webkitTransform = 'translateY('+height+'px)';
-		self.style.MozTransform = 'translateY('+height+'px)';
-		self.style.msTransform = 'translateY('+height+'px)';
-		self.style.OTransform = 'translateY('+height+'px)';
-		self.style.transform = 'translateY('+height+'px)';
+		self.style.webkitTransform = 'translateY('+height+'px)'
+		self.style.MozTransform = 'translateY('+height+'px)'
+		self.style.msTransform = 'translateY('+height+'px)'
+		self.style.OTransform = 'translateY('+height+'px)'
+		self.style.transform = 'translateY('+height+'px)'
 
-		var index = getIndex(self);
-		if(index >= 0) notifs.splice(index, 1);
+		var index = getIndex(self)
+		if(index >= 0) notifs.splice(index, 1)
 
 		// for others
-		var i = notifs.length - 1;
+		var i = notifs.length - 1
 		for(; i >= 0; i--) {
-			var valueUpdated = (i * height);
-			notifs[i].style.webkitTransform = 'translateY(-'+valueUpdated+'px)';
-			notifs[i].style.MozTransform = 'translateY(-'+valueUpdated+'px)';
-			notifs[i].style.msTransform = 'translateY(-'+valueUpdated+'px)';
-			notifs[i].style.OTransform = 'translateY(-'+valueUpdated+'px)';
-			notifs[i].style.transform = 'translateY(-'+valueUpdated+'px)';
+			var valueUpdated = (i * height)
+			notifs[i].style.webkitTransform = 'translateY(-'+valueUpdated+'px)'
+			notifs[i].style.MozTransform = 'translateY(-'+valueUpdated+'px)'
+			notifs[i].style.msTransform = 'translateY(-'+valueUpdated+'px)'
+			notifs[i].style.OTransform = 'translateY(-'+valueUpdated+'px)'
+			notifs[i].style.transform = 'translateY(-'+valueUpdated+'px)'
+
+			if(needsFixedSupport()) {
+				notifs[i].style.bottom = valueUpdated + 'px'
+			}
 		}
 
-		var progressBar = self.querySelector('.determinate');
+		var progressBar = self.querySelector('.determinate')
 		if(progressBar) {
-			progressBar.style.width = '0';
-			progressBar.style.transitionDuration = '0ms';
+			progressBar.style.width = '0'
+
+			progressBar.style.webkitTransitionDuration = '0ms'
+			progressBar.style.MozTransitionDuration = '0ms'
+			progressBar.style.msTransitionDuration = '0ms'
+			progressBar.style.OTransitionDuration = '0ms'
+			progressBar.style.transitionDuration = '0ms'
 		}
 
-		self.off(phonon.event.transitionEnd, onHide, false);
+		self.off(phonon.event.transitionEnd, onHide, false)
 
 		if(self.getAttribute('data-autodestroy') === 'true') {
 			window.setTimeout(function() {
-				document.body.removeChild(self);
-			}, 500);
+				document.body.removeChild(self)
+			}, 500)
 		}
 	}
 
 	function getIndex(notif) {
-		var i = notifs.length - 1;
+		var i = notifs.length - 1
 		for (; i >= 0; i--) {
 			if(notifs[i] === notif) {
-				return i;
+				return i
 			}
 		}
-		return -1;
+		return -1
 	}
-	
+
 	var getNotification = function(target) {
 		for (; target && target !== document; target = target.parentNode) {
 			if(target.classList.contains('notification')) {
-				return target;
+				return target
 			}
 		}
 	};
 
-	var buildNotif = function(text, timeout, showButton) {
-		if(typeof text !== 'string') text = '';
-		timeout = (typeof timeout === 'number' ? timeout : 5000);
+	var generateId = function() {
+		var text = ""
+		var possible = "abcdefghijklmnopqrstuvwxyz"
+		var i = 0
+		for(; i < 8; i++) {
+			text += possible.charAt(Math.floor(Math.random() * possible.length))
+		}
+		return text
+	}
 
-        var progress = '<div class="progress"><div class="determinate"></div></div>';
-        var btn = (showButton === true ? '<button class="btn pull-right" data-hide-notif="true">CANCEL</button>' : '');
+	var buildNotif = function(text, timeout, showButton, cancelButton) {
+		if(typeof text !== 'string') text = ''
+		timeout = (typeof timeout === 'number' ? timeout : 5000)
+		cancelButton = (typeof cancelButton === 'string' ? cancelButton : 'CANCEL')
 
-        var div = document.createElement('div');
-		div.setAttribute('class', 'notification');
-		div.setAttribute('data-autodestroy', 'true');
-		if(timeout) div.setAttribute('data-timeout', timeout);
-		div.id = 'auto-gen-notif-' + Math.floor(Date.now() / 1000);
+		var progress = '<div class="progress"><div class="determinate"></div></div>'
+		var btn = (showButton === true ? '<button class="btn pull-right" data-hide-notif="true">' + cancelButton + '</button>' : '')
 
-		div.innerHTML = progress + btn + text;
+		var div = document.createElement('div')
+		div.setAttribute('class', 'notification')
+		div.setAttribute('data-autodestroy', 'true')
+		if(timeout) div.setAttribute('data-timeout', timeout)
+		div.id = generateId()
 
-		document.body.appendChild(div);
+		div.innerHTML = progress + btn + text
 
-		return div;
+		document.body.appendChild(div)
+
+		return document.querySelector('#' + div.id)
 	};
 
 	document.on('tap', function(evt) {
 
-		var target = evt.target;
+		var target = evt.target
 
 		if(target.getAttribute('data-hide-notif') === 'true') {
-			var notification = getNotification(target);
-			if(notification) hide(notification);
+			var notification = getNotification(target)
+			if(notification) hide(notification)
 		}
 	});
 
+	/**
+	 *
+	 * Android JellyBean does not support
+	 * X,Y,Z translations with fixed elements
+	 */
+	function needsFixedSupport () {
+		var version = parseFloat(phonon.device.osVersion)
+		if(phonon.device.os === phonon.device.ANDROID
+			&& !isNaN(version) && version < 4.4) {
+			return true
+		}
+		return false
+	}
+
 	/*
-	 * Public API
+	* Public API
 	*/
 
 	function show(notification) {
 
-		if(!notification.classList.contains('show')) {
-			notification.classList.add('show');
+		if (notification.classList.contains('show')) return false
 
-			// Fix animation			
-			notification.style.zIndex = (18 + notifs.length);
+		window.setTimeout(function() {
+			notification.classList.add('show')
+		}, 10)
 
-			// Fix space
-			
-			var value = 0;
-			if(notifs.length > 0) {
-				var lastNotif = notifs[notifs.length - 1];
-				value = (notifs.length * lastNotif.clientHeight);
-			}
+		// Fix animation
+		notification.style.zIndex = (28 + notifs.length)
 
-			notification.style.webkitTransform = 'translateY(-'+value+'px)';
-			notification.style.MozTransform = 'translateY(-'+value+'px)';
-			notification.style.msTransform = 'translateY(-'+value+'px)';
-			notification.style.OTransform = 'translateY(-'+value+'px)';
-			notification.style.transform = 'translateY(-'+value+'px)';
-
-			notifs.push(notification);
-
-			// push floating actions
-			var fla = document.querySelector('.app-active .floating-action');
-			if(fla) {
-				fla.style.webkitTransform = 'translateY(-48px)';
-				fla.style.MozTransform = 'translateY(-48px)';
-				fla.style.msTransform = 'translateY(-48px)';
-				fla.style.OTransform = 'translateY(-48px)';
-				fla.style.transform = 'translateY(-48px)';
-			}
-
-			notification.on(phonon.event.transitionEnd, onShow, false);
+		// Fix space
+		var value = 0
+		if(notifs.length > 0) {
+			var lastNotif = notifs[notifs.length - 1]
+			value = (notifs.length * lastNotif.clientHeight)
 		}
+
+		notification.style.webkitTransform = 'translateY(-'+value+'px)'
+		notification.style.MozTransform = 'translateY(-'+value+'px)'
+		notification.style.msTransform = 'translateY(-'+value+'px)'
+		notification.style.OTransform = 'translateY(-'+value+'px)'
+		notification.style.transform = 'translateY(-'+value+'px)'
+
+		if(needsFixedSupport()) {
+			notification.style.bottom = value + 'px'
+		}
+
+		notifs.push(notification)
+
+		// push floating actions
+		var fla = document.querySelector('.app-active .floating-action')
+		if(fla) {
+			fla.style.webkitTransform = 'translateY(-48px)'
+			fla.style.MozTransform = 'translateY(-48px)'
+			fla.style.msTransform = 'translateY(-48px)'
+			fla.style.OTransform = 'translateY(-48px)'
+			fla.style.transform = 'translateY(-48px)'
+		}
+
+		notification.on(phonon.event.transitionEnd, onShow, false)
 	}
 
 	function hide(notification) {
 		if(notification.classList.contains('show')) {
 
-			notification.classList.remove('show');
-			
-			notification.on(phonon.event.transitionEnd, onHide, false);
+			notification.classList.remove('show')
+
+			notification.on(phonon.event.transitionEnd, onHide, false)
 
 			// put floating actions back in their place
-			var fla = document.querySelector('.app-active .floating-action');
+			var fla = document.querySelector('.app-active .floating-action')
 			if(fla) {
-				fla.style.webkitTransform = 'translateY(0)';
-				fla.style.MozTransform = 'translateY(0)';
-				fla.style.msTransform = 'translateY(0)';
-				fla.style.OTransform = 'translateY(0)';
-				fla.style.transform = 'translateY(0)';
+				fla.style.webkitTransform = 'translateY(0)'
+				fla.style.MozTransform = 'translateY(0)'
+				fla.style.msTransform = 'translateY(0)'
+				fla.style.OTransform = 'translateY(0)'
+				fla.style.transform = 'translateY(0)'
 			}
 		}
 	}
@@ -2587,239 +3620,258 @@ phonon.tagManager = (function () {
 	phonon.notif = function(el, timeout, showButton) {
 
 		if(arguments.length > 1) {
-
-			var text = el;
-			var nBuild = buildNotif(text, timeout, showButton);
-			window.setTimeout(function() {
-				show(document.querySelector('#'+nBuild.id));
-			}, 1);
-			return;
+			// el is text
+			return show(buildNotif(el, timeout, showButton))
 		}
 
-		var notif = (typeof el === 'string' ? document.querySelector(el) : el);
+		var notif = (typeof el === 'string' ? document.querySelector(el) : el)
 		if(notif === null) {
-			throw new Error('The notification with ID ' + el + ' does not exist');
+			throw new Error('The notification with ID ' + el + ' does not exist')
 		}
 
 		return {
 			show: function () {
-				show(notif);
+				show(notif)
 			},
 			hide: function () {
-				hide(notif);
+				hide(notif)
+			}
+		}
+	}
+
+	window.phonon = phonon
+
+	if(typeof exports === 'object') {
+		module.exports = phonon.notif
+	} else if(typeof define === 'function' && define.amd) {
+		define(function() { return phonon.notif })
+	}
+
+}(typeof window !== 'undefined' ? window : this, window.phonon || {}));
+
+/* ========================================================================
+* Phonon: panels.js v0.1.3
+* http://phonon.quarkdev.com
+* ========================================================================
+* Licensed under MIT (http://phonon.quarkdev.com)
+* ======================================================================== */
+;(function (window, document, phonon, undefined) {
+
+	'use strict'
+
+	var _activeObjects = []
+
+	var createBackdrop = function (id) {
+		var backdrop = document.createElement('div')
+		backdrop.classList.add('backdrop-panel')
+		backdrop.setAttribute('data-backdrop-for', id)
+		return backdrop
+	}
+
+	var findTrigger = function (target) {
+		var triggers = document.querySelectorAll('[data-panel-id], [data-panel-close]'), i
+		for (; target && target !== document; target = target.parentNode) {
+			for (i = triggers.length; i--;) {
+				if (triggers[i] === target) {
+					return target
+				}
+			}
+		}
+	}
+
+	var getPanel = function (event) {
+		var panelToggle = findTrigger(event.target)
+		if (panelToggle) {
+			var panelId = panelToggle.getAttribute('data-panel-id')
+			if(panelId) {
+				return document.querySelector('#'+panelId)
+			} else {
+				return findDOMPanel(event.target)
+			}
+		}
+	}
+
+	var findObject = function(panelId) {
+		var length = _activeObjects.length
+		var i = 0
+		for (; i < length; i++) {
+			if(_activeObjects[i].panel.getAttribute('id') === panelId) {
+				var found = _activeObjects[i]
+				found.index = i
+				return found
+			}
+		}
+		return null
+	}
+
+	var findDOMPanel = function (target) {
+		var panels = document.querySelectorAll('.panel, .panel-full'), i
+
+		for (; target && target !== document; target = target.parentNode) {
+			for (i = panels.length; i--;) {
+				if (panels[i] === target && target.classList.contains('active')) {
+					return target
+				}
+			}
+		}
+	}
+
+	/**
+	* Used to find an opened dialog
+	* in front of a panel
+	* @todo clean this
+	*/
+	var onDialog = function (target) {
+		for (; target && target !== document; target = target.parentNode) {
+			if (target.classList.contains('dialog') || target.classList.contains('backdrop-dialog')) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	document.on(phonon.event.start, function (evt) {
+		evt = evt.originalEvent || evt;
+
+		// don't close panels if notifications are pressed
+		if(evt.target.classList.contains('notification') || evt.parentNode && evt.target.parentNode.classList.contains('notification')) return
+		// don't close panels if a dialog is opened
+		if(onDialog(evt.target)) return;
+
+		if(_activeObjects.length > 0) {
+			var previousPanel = _activeObjects[_activeObjects.length - 1].panel, p = findDOMPanel(evt.target);
+
+			if (!p) {
+				close(previousPanel);
+			}
+
+			if (p && p !== previousPanel) {
+				// Case where there are two active panels
+				if (p.id !== previousPanel.id) {
+					close(previousPanel);
+				}
+			}
+		}
+	});
+
+	document.on(phonon.event.tap, function (evt) {
+
+		// don't close panels if notifications are pressed
+		if(evt.target.classList.contains('notification') || evt.parentNode && evt.target.parentNode.classList.contains('notification')) return
+		// don't close panels if a dialog is opened
+		if(onDialog(evt.target)) return;
+
+		var trigger = findTrigger(evt.target), panel = null;
+
+		if (trigger) {
+			panel = getPanel(evt);
+
+			if(panel) {
+				panel.classList.contains('active') ? close(panel) : open(panel);
+			}
+		}
+
+		panel = findDOMPanel(evt.target);
+
+		if(!panel && !trigger) {
+			if(_activeObjects.length > 0) {
+				var previousPanel = _activeObjects[_activeObjects.length - 1].panel, p = findDOMPanel(evt.target);
+				close(previousPanel);
+			}
+		}
+	});
+
+	function onHide() {
+		document.body.removeChild(this);
+
+		var object = findObject(this.getAttribute('data-backdrop-for'))
+
+		_activeObjects.splice(object.index, 1)
+
+		this.off(phonon.event.transitionEnd, onHide, false);
+	}
+
+	/**
+	* Public API
+	*/
+
+	function open (panel) {
+		if(!panel.classList.contains('active')) {
+			panel.style.display = 'block';
+
+			window.setTimeout(function () {
+				panel.classList.add('active');
+			}, 10);
+			
+			var backdrop = createBackdrop(panel.getAttribute('id'));
+
+			document.body.appendChild(backdrop);
+
+			_activeObjects.push({panel: panel, backdrop: backdrop});
+		}
+	}
+
+	function close (panel) {
+		if(panel.classList.contains('active')) {
+			panel.classList.remove('active');
+			panel.classList.add('panel-closing');
+
+			var closePanel = function () {
+				panel.classList.remove('panel-closing');
+				panel.style.display = 'none';
+				panel.off(phonon.event.transitionEnd, closePanel);
+			};
+
+			panel.on(phonon.event.transitionEnd, closePanel);
+
+			var pObject = findObject(panel.getAttribute('id'))
+
+			if(pObject) {
+				pObject.backdrop.classList.add('fadeout');
+				pObject.backdrop.on(phonon.event.transitionEnd, onHide, false);
+			}
+
+		}
+	}
+
+	function closeActive() {
+		var closable = (_activeObjects.length > 0 ? true : false);
+		if(closable) {
+			close(_activeObjects[_activeObjects.length - 1].panel);
+		}
+		return closable;
+	}
+
+	phonon.panel = function (el) {
+		var panel = (typeof el === 'string' ? document.querySelector(el) : el);
+		if(panel === null) {
+			throw new Error('The panel with ID ' + el + ' does not exist');
+		}
+
+		return {
+			open: function () {
+				open(panel);
+			},
+			close: function () {
+				close(panel);
 			}
 		};
 	};
 
-    window.phonon = phonon;
+	phonon.panelUtil = {
+		closeActive: closeActive
+	};
+
+	window.phonon = phonon;
 
 	if(typeof exports === 'object') {
-		module.exports = phonon.notif;
+		module.exports = phonon.panel;
 	} else if(typeof define === 'function' && define.amd) {
-		define(function() { return phonon.notif });
+		define(function() { return phonon.panel });
 	}
 
-}(typeof window !== 'undefined' ? window : this, window.phonon || {}));
-/* ========================================================================
- * Phonon: panels.js v0.1.2
- * http://phonon.quarkdev.com
- * ========================================================================
- * Licensed under MIT (http://phonon.quarkdev.com)
- * ======================================================================== */
-;(function (window, document, phonon, undefined) {
-  
-  'use strict';
-
-  var panels = [];
-  var busy = false;
-
-  var createBackdrop = function () {
-    var backdrop = document.createElement('div');
-    backdrop.classList.add('backdrop-panel');
-    return backdrop;
-  };
-
-  var findTrigger = function (target) {
-    var triggers = document.querySelectorAll('[data-panel-id], [data-panel-close]'), i;
-    for (; target && target !== document; target = target.parentNode) {
-      for (i = triggers.length; i--;) {
-        if (triggers[i] === target) {
-          return target;
-        }
-      }
-    }
-  };
-
-  var getPanel = function (event) {
-    var panelToggle = findTrigger(event.target);
-    if (panelToggle) {
-      var panelId = panelToggle.getAttribute('data-panel-id');
-      if(panelId) {
-        return document.querySelector('#'+panelId);
-      } else {
-        return findPanel(event.target);
-      }
-    }
-  };
-
-  var findPanel = function (target) {
-    var panels = document.querySelectorAll('.panel, .panel-full'), i;
-
-    for (; target && target !== document; target = target.parentNode) {
-      for (i = panels.length; i--;) {
-        if (panels[i] === target && target.classList.contains('active')) {
-          return target;
-        }
-      }
-    }
-  };
-
-  document.on(phonon.event.start, function (evt) {
-    evt = evt.originalEvent || evt;
-
-    if(panels.length > 0) {
-      var previousPanel = panels[panels.length - 1].panel, p = findPanel(evt.target);
-      
-      if (!p) {
-        close(previousPanel);
-      }
-
-      if (p && p !== previousPanel) {
-        // Case where there are two active panels
-        if (p.id !== previousPanel.id) {
-          close(previousPanel);
-        }
-      } 
-    }
-  });
-
-  document.on(phonon.event.tap, function (evt) {
-
-    var trigger = findTrigger(evt.target), panel = null;
-    
-    if (trigger) {
-      panel = getPanel(evt);
-
-      if(panel) {
-        panel.classList.contains('active') ? close(panel) : open(panel);
-      }
-    }
-
-    panel = findPanel(evt.target);
-
-    if(!panel && !trigger) {
-      if(panels.length > 0) {
-        var previousPanel = panels[panels.length - 1].panel, p = findPanel(evt.target);
-        close(previousPanel);
-      }
-    }
-  });
-
-  function onHide() {
-
-    var page = document.querySelector('.app-active');
-    if(page.querySelector('div.backdrop-panel') !== null) {
-
-      var backdrop = panels[panels.length - 1].backdrop;
-      backdrop.classList.remove('fadeout');
-
-      page.removeChild(backdrop);
-    }
-
-    panels[panels.length - 1].panel.style.visibility = 'visible';
-    busy = false;
-
-    panels.pop();
-
-    this.off(phonon.event.transitionEnd, onHide, false);
-  }
-
-  /**
-   * Public API
-  */
-
-  function open (panel) {
-    if(busy) {
-      return;
-    }
-    
-    panel.style.visibility = 'visible';
-
-    if(!panel.classList.contains('active')) {
-      panel.classList.add('active');
-
-      var backdrop = backdrop = createBackdrop();
-      document.querySelector('.app-active').appendChild(backdrop);
-
-      panels.push( {panel: panel, backdrop: backdrop} );
-    }
-  }
-
-  function close (panel) {
-
-    if(busy) {
-      return;
-    }
-
-    if(panel.classList.contains('active') && !busy) {
-      
-      busy = true;
-
-      panel.classList.remove('active');
-      panel.classList.add('panel-closing');
-      
-      var closePanel = function () {
-        panel.classList.remove('panel-closing');
-        panel.off(phonon.event.transitionEnd, closePanel);
-      };
-
-      panel.on(phonon.event.transitionEnd, closePanel);
-
-      if(panels.length > 0) {
-        var backdrop = panels[panels.length - 1].backdrop;
-        backdrop.classList.add('fadeout');
-        backdrop.on(phonon.event.transitionEnd, onHide, false);
-      }
-    }
-  }
-
-  phonon.panel = function (el) {
-    if(typeof el === 'undefined') {
-      return {
-        closeActive: function() {
-          var closable = (panels.length > 0 ? true : false);
-          if(closable) {
-            close(panels[panels.length - 1].panel);
-          }
-          return closable;
-        }
-      }
-    }
-
-    var panel = (typeof el === 'string' ? document.querySelector(el) : el);
-    if(panel === null) {
-      throw new Error('The panel with ID ' + el + ' does not exist');
-    }
-
-    return {
-      open: function () {
-        open(panel);
-      },
-      close: function () {
-        close(panel);
-      }
-    };
-  };
-
-  window.phonon = phonon;
-
-  if(typeof exports === 'object') {
-    module.exports = phonon.panel;
-  } else if(typeof define === 'function' && define.amd) {
-    define(function() { return phonon.panel });
-  }
-
 }(window, document, window.phonon || {}));
+
 /* ========================================================================
  * Phonon: popovers.js v0.0.5
  * http://phonon.quarkdev.com
@@ -2835,6 +3887,7 @@ phonon.tagManager = (function () {
   var isOpened = false;
   var backdrop = document.createElement('div');
   backdrop.classList.add('backdrop-popover');
+  var onChangeCallbacks = []
 
   var findTrigger = function (target) {
 
@@ -2876,16 +3929,13 @@ phonon.tagManager = (function () {
     return res;
   };
 
-  var findPopover = function (target) {
-    var popovers = document.querySelectorAll('.popover');
-    var i;
+  var onPopover = function (target) {
     for (; target && target !== document; target = target.parentNode) {
-      for (i = popovers.length; i--;) {
-        if (popovers[i] === target && target.classList.contains('active')) {
-          return target;
-        }
+      if (target.classList.contains('popover') && target.classList.contains('active')) {
+        return target;
       }
     }
+    return false;
   };
 
   var onItem = function(target) {
@@ -2900,9 +3950,7 @@ phonon.tagManager = (function () {
   document.on(phonon.event.start, function (e) {
     e = e.originalEvent || e;
 
-    var p = findPopover(e.target);
-
-    if (!p && isOpened) {
+    if (!onPopover(e.target) && isOpened) {
       close(previousPopover);
     }
     touchMove = false;
@@ -2916,19 +3964,18 @@ phonon.tagManager = (function () {
   document.on(phonon.event.end, function (evt) {
 
     var target = evt.target, trigger = findTrigger(target);
+    var popover = document.querySelector('#'+trigger.id);
 
-    if (trigger.target) {
-      
-      var popover = document.querySelector('#'+trigger.id);
-
-      if(popover) {
-
+    if (trigger.target && popover) {
         if(popover.classList.contains('active') && !touchMove) {
           close(popover);
         } else {
-          open(popover, trigger.direction);
+            if(trigger.direction === 'button') {
+                openFrom(popover, trigger.target);
+            } else {
+                open(popover, trigger.direction);
+            }
         }
-      }
     }
 
     // fix
@@ -2937,11 +3984,16 @@ phonon.tagManager = (function () {
     }
 
     if(onItem(target) && !touchMove) {
-
       close(previousPopover);
 
+      var changeData = {
+          text: target.textContent,
+          value: target.getAttribute('data-value'),
+          target: evt.target
+      };
+
       evt = new CustomEvent('itemchanged', {
-        detail: { item: target.textContent, target: evt.target },
+        detail: changeData,
         bubbles: true,
         cancelable: true
       });
@@ -2962,43 +4014,125 @@ phonon.tagManager = (function () {
       }
 
       previousPopover.dispatchEvent(evt);
+
+      for (var i = 0; i < onChangeCallbacks.length; i++) {
+          var o = onChangeCallbacks[i];
+          if(o.id === previousPopover.getAttribute('id')) {
+              o.callback(changeData);
+              // do not stop loop, maybe there are many callbacks
+          }
+      }
     }
   });
 
   function onHide() {
-
     var page = document.querySelector('.app-active');
     if(page.querySelector('div.backdrop-popover') !== null) {
       page.removeChild(backdrop);
     }
     previousPopover.style.visibility = 'hidden';
+    previousPopover.style.display = 'none';
+    if(previousPopover.getAttribute('data-virtual') === 'true') {
+        // remove from DOM
+        document.body.removeChild(previousPopover);
+    }
     previousPopover = null;
+  }
+
+  function buildPopover() {
+    var popover = document.createElement('div');
+    popover.classList.add('popover');
+    popover.setAttribute('id', generateId());
+    popover.setAttribute('data-virtual', 'true');
+    document.body.appendChild(popover);
+    return document.body.lastChild;
+  }
+
+  function buildListItem(item) {
+    var text = typeof item === 'string' ? item : item.text;
+    var value = typeof item === 'string' ? item : item.value;
+    return '<li><a class="padded-list" data-value="' + value + '">' + text + '</a></li>';
   }
 
   /**
    * Public API
   */
-
-  function open (popover, direction) {
-    if(direction === undefined) {
-      direction = 'left';
+  function setList(popover, data, customItemBuilder) {
+    if(!(data instanceof Array)) {
+      throw new Error('The list of the popover must be an array, ' + typeof data + ' given');
     }
 
-    isOpened = true;
+    var list = '<ul class="list">';
+    var itemBuilder = buildListItem
+    if(typeof customItemBuilder === 'function') {
+        itemBuilder = customItemBuilder
+    }
 
-    popover.style.visibility = 'visible';
+    for (var i = 0; i < data.length; i++) {
+      list += itemBuilder(data[i]);
+    }
+    list += '</ul>';
+    popover.innerHTML = list
+  }
 
-    // Reset the scroll state
-    popover.querySelector('ul').scrollTop = 0;
+  function generateId() {
+    var text = ''
+    var possible = 'abcdefghijklmnopqrstuvwxyz'
+    var i = 0
+    for(; i < 8; i++) {
+      text += possible.charAt(Math.floor(Math.random() * possible.length))
+    }
+    return text
+  }
 
-    previousPopover = popover;
-    if(!popover.classList.contains('active')) {
+  function openable(popover) {
+      if(!popover.classList.contains('active')) {
+        isOpened = true;
+        previousPopover = popover;
 
+        popover.style.display = 'block';
+        window.setTimeout(function() {
+            popover.style.visibility = 'visible';
+            popover.classList.add('active');
+        }, 10);
+
+        // Reset the scroll state
+        popover.querySelector('ul').scrollTop = 0;
+
+        // add backdrop
+        document.querySelector('.app-page.app-active').appendChild(backdrop);
+
+        return true;
+      }
+      return false;
+  }
+
+  function openFrom(popover, trigger) {
+      var page = document.querySelector('.app-page.app-active');
+      trigger = (typeof trigger === 'string' ? page.querySelector(trigger) : trigger);
+
+      if(trigger === null) {
+          throw new Error('The trigger for the popover does not exists');
+      }
+
+      if(!openable(popover)) return
+
+      var rect = trigger.getBoundingClientRect();
+      popover.style.width = trigger.clientWidth + 'px';
+      popover.style.top = rect.top + 'px';
+      popover.style.left = rect.left + 'px';
+  }
+
+  function open(popover, direction) {
+    if(typeof direction === 'undefined') {
+        direction = 'left'
+    }
+
+    if(openable(popover)) {
       var page = document.querySelector('.app-page.app-active');
       var pageStyle = page.currentStyle || window.getComputedStyle(page);
 
       if(direction === 'title' || direction === 'title-left') {
-
         var hb = page.querySelector('.header-bar');
         popover.style.top = hb.offsetHeight + 'px';
 
@@ -3008,7 +4142,6 @@ phonon.tagManager = (function () {
           popover.style.left = (16 + parseInt(pageStyle.marginLeft)) + 'px';
         }
       } else if(direction === 'left' || direction === 'right') {
-
         popover.style.top = '12px';
 
         if(direction === 'left') {
@@ -3017,21 +4150,7 @@ phonon.tagManager = (function () {
           popover.style.left = 'auto';
           popover.style.right = '16px';
         }
-      } else {
-
-        var trigger = document.querySelector('.btn-popover[data-popover-id="'+ popover.id +'"]');
-        var rect = trigger.getBoundingClientRect();
-
-        popover.style.width = trigger.clientWidth + 'px';
-        popover.style.top = rect.top + 'px';
-        popover.style.left = rect.left + 'px';
       }
-      
-      if(!popover.classList.contains('active')) {
-        popover.classList.add('active');
-      }
-
-      page.appendChild(backdrop);
     }
   }
 
@@ -3048,34 +4167,75 @@ phonon.tagManager = (function () {
     }
   }
 
-  phonon.popover = function (el) {
-    if(typeof el === 'undefined') {
-      return {
-        closeActive: function() {
-          var closable = (previousPopover ? true : false);
-          if(closable) {
-            close(previousPopover);
-          }
-          return closable;
-        }
+  function closeActive() {
+      var closable = (previousPopover ? true : false);
+      if(closable) {
+          close(previousPopover);
       }
+      return closable;
+  }
+
+  function attachButton(popover, button, autoBind) {
+    var button = (typeof button === 'string' ? document.querySelector(button) : button);
+    if(button === null) {
+      throw new Error('The button does not exists');
+    }
+    var popoverId = popover.getAttribute('id');
+    button.setAttribute('data-popover-id', popoverId);
+    if(autoBind === true) {
+      button.setAttribute('data-autobind', true);
+    }
+  }
+
+  function getInstance(popover) {
+      return {
+          setList: function(list, itemBuilder) {
+              setList(popover, list, itemBuilder);
+              return this;
+          },
+          open: function (direction) {
+              open(popover, direction);
+              return this;
+          },
+          openFrom: function (trigger) {
+              openFrom(popover, trigger);
+              return this;
+          },
+          close: function () {
+              close(popover);
+              return this;
+          },
+          onItemChanged: function (callback) {
+              onChangeCallbacks.push({id: popover.getAttribute('id'), callback: callback});
+              return this;
+          },
+          attachButton: function (button, autoBind) {
+              attachButton(popover, button, autoBind);
+              return this;
+          }
+      }
+  }
+
+  phonon.popover = function (el) {
+    if(typeof el === 'string' && el === '_caller') {
+        return getInstance();
+    }
+    if(typeof el === 'undefined') {
+      return getInstance(buildPopover())
     }
 
     var popover = (typeof el === 'string' ? document.querySelector(el) : el);
     if(popover === null) {
-      throw new Error('The popover with ID ' + el + ' does not exist');
+      throw new Error('The popover with ID ' + el + ' does not exists');
     }
 
-    return {
-      open: function () {
-        open(popover);
-      },
-      close: function () {
-        close(popover);
-      }
-    };
+    return getInstance(popover);
   };
-  
+
+  phonon.popoverUtil = {
+      closeActive: closeActive
+  };
+
   window.phonon = phonon;
 
   if(typeof exports === 'object') {
@@ -3085,6 +4245,7 @@ phonon.tagManager = (function () {
   }
 
 }(typeof window !== 'undefined' ? window : this, window.phonon || {}));
+
 /* ========================================================================
  * Phonon: preloaders.js v0.0.5
  * http://phonon.quarkdev.com
@@ -3233,17 +4394,18 @@ phonon.tagManager = (function () {
             },
             // @phonon
             createBackdrop: function() {
+
                 if(!backdrop) {
-                
+
                     var bd = document.createElement('div');
                     bd.classList.add('backdrop-panel');
                     backdrop = bd;
 
-                    document.querySelector('.app-active').appendChild(backdrop);
+                    settings.element.appendChild(backdrop);
                 }
             },
             removeBackdrop: function() {
-                
+
                 if(backdrop) {
 
                     // Set backdrop to null immediately
@@ -3252,7 +4414,7 @@ phonon.tagManager = (function () {
 
                     var closed = function () {
                         _backdrop.classList.remove('fadeout');
-                        document.querySelector('.app-active').removeChild(_backdrop);
+                        settings.element.removeChild(_backdrop);
                         _backdrop.off(phonon.event.transitionEnd, closed);
                     };
 
@@ -3392,7 +4554,7 @@ phonon.tagManager = (function () {
                         cache.animatingInterval = setInterval(function() {
                             utils.dispatchEvent('animating');
                         }, 1);
-                        
+
                         utils.events.addEvent(settings.element, utils.transitionCallback(), action.translate.easeCallback);
                         action.translate.x(n);
                     }
@@ -3404,7 +4566,7 @@ phonon.tagManager = (function () {
                     if( (settings.disable==='left' && n>0) ||
                         (settings.disable==='right' && n<0)
                     ){ return; }
-                    
+
                     if( !settings.hyperextensible ){
                         if( n===settings.maxPosition || n>settings.maxPosition ){
                             n=settings.maxPosition;
@@ -3412,7 +4574,7 @@ phonon.tagManager = (function () {
                             n=settings.minPosition;
                         }
                     }
-                    
+
                     n = parseInt(n, 10);
                     if(isNaN(n)){
                         n = 0;
@@ -3446,25 +4608,25 @@ phonon.tagManager = (function () {
                     // No drag on ignored elements
                     var target = e.target ? e.target : e.srcElement,
                         ignoreParent = utils.parentUntil(target, 'data-snap-ignore');
-                    
+
                     if (ignoreParent) {
                         utils.dispatchEvent('ignore');
                         return;
                     }
-                    
-                    
+
+
                     if(settings.dragger){
                         var dragParent = utils.parentUntil(target, settings.dragger);
-                        
+
                         // Only use dragger if we're in a closed state
-                        if( !dragParent && 
-                            (cache.translation !== settings.minPosition && 
+                        if( !dragParent &&
+                            (cache.translation !== settings.minPosition &&
                             cache.translation !== settings.maxPosition
                         )){
                             return;
                         }
                     }
-                    
+
                     utils.dispatchEvent('start');
                     settings.element.style[cache.vendor+'Transition'] = '';
                     cache.isDragging = true;
@@ -3782,22 +4944,21 @@ phonon.tagManager = (function () {
     var sidePanels = [];
     var sidePanelActive = null;
 
-    function findSidebar(id) {
-
+    function findSidePanel(id) {
         var i = sidePanels.length - 1;
-
         for (; i >= 0; i--) {
             if(sidePanels[i].el.id === id) {
                 return sidePanels[i];
             }
         }
+        return null;
     }
 
     /**
      * Render the sidebar of the current page
     */
     function render(evt) {
-        
+
         var currentPage = (typeof evt !== 'undefined' ? evt.detail.page : phonon.navigator().currentPage);
         var pageEl = document.querySelector(currentPage);
         var tabs = pageEl.querySelector('[data-tab-contents="true"]');
@@ -3807,16 +4968,17 @@ phonon.tagManager = (function () {
         for (; i >= 0; i--) {
 
             var sb = sidePanels[i];
-
-            var page = sb.el.getAttribute('data-page');
             var exposeAside = sb.el.getAttribute('data-expose-aside');
 
-            if(page !== currentPage) {
+            if(sb.pages.indexOf(currentPage) === -1) {
 
                 sb.el.style.display = 'none';
                 sb.el.style.visibility = 'hidden';
 
             } else {
+
+				// #90: update the snapper according to the page
+				sb.snapper.settings( {element: pageEl} );
 
                 sb.el.style.display = 'block';
                 sb.el.style.visibility = 'visible';
@@ -3847,7 +5009,7 @@ phonon.tagManager = (function () {
                 // On phone, the sidebar is draggable only if tabs are not present
                 if(!tabs && isPhone) {
                     sb.snapper.settings( {touchToDrag: true} );
-                    sb.snapper.enable(); 
+                    sb.snapper.enable();
                 }
             }
         }
@@ -3889,11 +5051,24 @@ phonon.tagManager = (function () {
         var i = spEls.length - 1;
 
         for (; i >= 0; i--) {
-            
+
             var el = spEls[i];
             var disable = el.getAttribute('data-disable');
-            var page = el.getAttribute('data-page');
-            var pageEl = document.querySelector(page);
+            var pages = el.getAttribute('data-page');
+
+			var _pages = [];
+
+			var page = pages.split(',');
+			var j = 0;
+			var l = page.length;
+
+			for (; j < l; j++) {
+				var _page = page[j].trim();
+		                if(j == 0){
+		                    var pageEl = document.querySelector(_page);
+		                }
+				_pages.push(_page)
+			}
 
             // Options
             var options = {
@@ -3906,7 +5081,7 @@ phonon.tagManager = (function () {
             };
 
             var snapper = new Snap(options);
-            sidePanels.push({snapper: snapper, el: el, direction: (el.classList.contains('side-panel-left') ? 'left' : 'right')});
+            sidePanels.push({snapper: snapper, el: el, pages: _pages, direction: (el.classList.contains('side-panel-left') ? 'left' : 'right')});
         }
     });
 
@@ -3917,26 +5092,43 @@ phonon.tagManager = (function () {
     }
 
     function close(sb) {
-        sb.snapper.close(sb.direction);
+        sb.snapper.close();
         sidePanelActive = null;
         document.off(phonon.event.end, onBackdrop);
     }
 
+    function onSidebar(target) {
+        var isSidebar = false;
+        for (; target && target !== document; target = target.parentNode) {
+            if (target.classList.contains('side-panel')) {
+                isSidebar = true;
+                break;
+            }
+        }
+        return isSidebar;
+    }
 
-    document.on('tap', function(evt) {
+    document.on(phonon.event.tap, function(evt) {
 
         var target = evt.target;
         var sidebarId = target.getAttribute('data-side-panel-id');
         var sidebarClose = target.getAttribute('data-side-panel-close');
 
-        if(sidebarClose === 'true') {
-            if(sidePanelActive) close(sidePanelActive);
-            return;
-        }
+    	if(sidebarClose === 'true') {
+    	    if(sidePanelActive) {
+    	        close(sidePanelActive);
+    	    } else if(sidebarId !== null) {
+    	        var sb = findSidePanel(sidebarId);
+    	        if(sb) {
+    	            close(sb);
+    	        }
+    	    }
+    	    return;
+    	}
 
         if(sidebarId !== null) {
 
-            var sb = findSidebar(sidebarId);
+            var sb = findSidePanel(sidebarId);
 
             if(sb) {
 
@@ -3954,14 +5146,14 @@ phonon.tagManager = (function () {
             }
         }
     });
-    
+
     var onBackdrop = function(evt) {
 
         var target = evt.target;
         var onSidebar = false;
 
         if(sidePanelActive === null) return;
-        
+
         for (; target && target !== document; target = target.parentNode) {
             if (target.classList.contains('side-panel')) {
                 onSidebar = true;
@@ -3975,47 +5167,61 @@ phonon.tagManager = (function () {
         }
     };
 
-    phonon.sidePanel = function() {
+    function closeActive() {
+        var currentPage = phonon.navigator().currentPage;
+        var i = sidePanels.length - 1;
 
-        return {
-            closeActive: function() {
+        for (; i >= 0; i--) {
 
-                var currentPage = phonon.navigator().currentPage;
-                var i = sidePanels.length - 1;
+            var sb = sidePanels[i];
+            var exposeAside = sb.el.getAttribute('data-expose-aside');
+            if(sb.pages.indexOf(currentPage) !== -1) {
 
-                for (; i >= 0; i--) {
+                var data = sb.snapper.state();
 
-                    var sb = sidePanels[i];
-                    var page = sb.el.getAttribute('data-page');
-                    var exposeAside = sb.el.getAttribute('data-expose-aside');
-
-                    if(page === currentPage) {
-
-                        var data = sb.snapper.state();
-
-                        if(data.state === 'opened') {
-                            if(isPhone) {
-                                sb.snapper.close(sb.direction);
-                                return true;
-                            }
-                            if(!isPhone && exposeAside !== 'left' && exposeAside !== 'right') {
-                                sb.snapper.close(sb.direction);
-                                return true;
-                            }
-                        }
-
-                        return false;
+                if(data.state !== 'closed') {
+                    if(isPhone) {
+                        close(sb);
+                        return true;
+                    }
+                    if(!isPhone && exposeAside !== 'left' && exposeAside !== 'right') {
+                        close(sb);
+                        return true;
                     }
                 }
+
                 return false;
             }
-        };
+        }
+        return false;
     }
+
+    phonon.sidePanel = function(sidePanelId) {
+        sidePanelId = sidePanelId.replace('#', '');
+        var sidePanel = findSidePanel(sidePanelId)
+        if(sidePanel === null) {
+            throw new Error('The side panel with id [' + sidePanelId + '] does not exists');
+        }
+
+        return {
+            open: function() {
+                open(sidePanel);
+            },
+            close: function() {
+                close(sidePanel);
+            }
+        }
+    }
+
+    phonon.sidePanelUtil = {
+        closeActive: closeActive
+    };
 
     window.on('resize', resize);
     document.on('pageopened', render);
 
 }(typeof window !== 'undefined' ? window : this, window.phonon || {}));
+
 /*!
  * ---------------------------- DRAGEND JS -------------------------------------
  *
@@ -4276,9 +5482,10 @@ phonon.tagManager = (function () {
       this._sizePages = proxy( this._sizePages, this );
       this._afterScrollTransform = proxy(this._afterScrollTransform, this);
 
-      this.pageContainer.innerHTML = container.cloneNode(true).innerHTML;
-      container.innerHTML = "";
-      container.appendChild( this.pageContainer );
+      while (container.firstChild)
+        this.pageContainer.appendChild(container.firstChild);
+
+      container.appendChild(this.pageContainer);
 
       this._scroll = supportTransform ? this._scrollWithTransform : this._scrollWithoutTransform;
       this._animateScroll = supportTransform ? this._animateScrollWithTransform : this._animateScrollWithoutTransform;
@@ -4319,7 +5526,7 @@ phonon.tagManager = (function () {
             return false;
         }
 
-        var el = document.createElement('p'), 
+        var el = document.createElement('p'),
             has3d,
             transforms = {
                 'webkitTransform':'-webkit-transform',
@@ -4401,6 +5608,10 @@ phonon.tagManager = (function () {
         };
       },
 
+      // @phonon
+      _xDown: 0,
+      _yDown: 0,
+
       // Observe
       //
       // Sets the observers for drag, resize and key events
@@ -4428,6 +5639,10 @@ phonon.tagManager = (function () {
           event.stopPropagation();
         }
 
+        // @phonon
+        this._xDown = (event.touches ? event.touches[0].clientX : event.clientX);
+        this._yDown = (event.touches ? event.touches[0].clientY : event.clientY);
+
         addEventListener(doc.body, moveEvent, this._onMove);
         addEventListener(doc.body, endEvent, this._onEnd);
 
@@ -4444,9 +5659,19 @@ phonon.tagManager = (function () {
         // ensure swiping with one touch and not pinching
         if ( event.touches && event.touches.length > 1 || event.scale && event.scale !== 1) return;
 
-        event.preventDefault();
-        if (this.settings.stopPropagation) {
-          event.stopPropagation();
+        // @phonon ensure vertical scrolling works
+        var xUp = (event.touches ? event.touches[0].clientX : event.clientX);
+        var yUp = (event.touches ? event.touches[0].clientY : event.clientY);
+
+        var xDiff = this._xDown - xUp;
+        var yDiff = this._yDown - yUp;
+
+        // @phonon: prevent default only if it is a horizontal swipe fix #43
+        if ( Math.abs( xDiff ) > Math.abs( yDiff ) ) {
+          event.preventDefault();
+          if (this.settings.stopPropagation) {
+            event.stopPropagation();
+          }
         }
 
         var parsedEvent = this._parseEvent(event),
@@ -4745,13 +5970,13 @@ phonon.tagManager = (function () {
         var style;
 
         if (has3d()) {
-          style = this.settings.direction === "horizontal" ? 
+          style = this.settings.direction === "horizontal" ?
               "translate3d(" + coordinates.x + "px, 0, 0)" :
               "translate3d(0, " + coordinates.y + "px, 0)";
 
         } else {
-          style = this.settings.direction === "horizontal" ? 
-              "translateX(" + coordinates.x + "px)" : 
+          style = this.settings.direction === "horizontal" ?
+              "translateX(" + coordinates.x + "px)" :
               "translateY(" + coordinates.y + "px)";
         }
 
@@ -4873,7 +6098,7 @@ phonon.tagManager = (function () {
           this.scrollToPage( this.settings.scrollToPage );
           delete this.settings.scrollToPage;
         }
-		
+
         if (this.settings.destroy) {
           this.destroy();
           delete this.settings.destroy;
@@ -5000,18 +6225,20 @@ phonon.tagManager = (function () {
 
             var tabIndicator = document.querySelector(pageName).querySelector('.tab-indicator');
 
-            var zeroTabNumber = tabNumber - 1;
+            if(tabIndicator) {
+              var zeroTabNumber = tabNumber - 1;
 
-            // indicator
-            tabIndicator.style.webkitTransform = 'translateX('+zeroTabNumber+'00%)';
-            tabIndicator.style.MozTransform = 'translateX('+zeroTabNumber+'00%)';
-            tabIndicator.style.msTransform = 'translateX('+zeroTabNumber+'00%)';
-            tabIndicator.style.OTransform = 'translateX('+zeroTabNumber+'00%)';
-            tabIndicator.style.transform = 'translateX('+zeroTabNumber+'00%)';
+              // indicator
+              tabIndicator.style.webkitTransform = 'translateX('+zeroTabNumber+'00%)';
+              tabIndicator.style.MozTransform = 'translateX('+zeroTabNumber+'00%)';
+              tabIndicator.style.msTransform = 'translateX('+zeroTabNumber+'00%)';
+              tabIndicator.style.OTransform = 'translateX('+zeroTabNumber+'00%)';
+              tabIndicator.style.transform = 'translateX('+zeroTabNumber+'00%)';
+            }
 
-        	  // content
+        	  // update tab content
             tabs[i].dragend.scrollToPage(tabNumber);
-	        	
+
 	        	break;
 	        }
 	    }
@@ -5029,6 +6256,11 @@ phonon.tagManager = (function () {
 	    var tabIndicator = pageEl.querySelector('.tab-indicator');
 	    var preventDrag = (tabsEl.getAttribute('data-disable-swipe') === 'true' ? true : false);
 
+      var currentTab = parseInt(tabsEl.getAttribute('data-tab-default'));
+      if(isNaN(currentTab) || currentTab > tabItems.length) {
+        currentTab = 1;
+      }
+
 	    tabIndicator.style.width = (100/tabItems.length) + '%';
 
 	    var options = {
@@ -5044,8 +6276,13 @@ phonon.tagManager = (function () {
 	            updateIndicator(pageName, tabNumber);
 	        }
 	    };
-	    
-	    tabs.push( {page: pageName, dragend: new Dragend(tabsEl, options), currentTab: 1} );
+
+	    tabs.push( {page: pageName, dragend: new Dragend(tabsEl, options), currentTab: currentTab} );
+
+      // Dragend gives "10ms" for the DOM update
+      window.setTimeout(function() {
+        updateIndicator(pageName, currentTab);
+      }, 10);
 	}
 
 	/**

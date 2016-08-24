@@ -120,7 +120,7 @@ function changePin() {
 		crossDomain: true,
 		dataType: 'json',
 		success: function(res) {
-			phonon.notif('Your new pin is ' + res.newPin + '. Make sure to get your MaineCard re-programmed in your building lobby.', 5000, false);
+			phonon.notif('Your new pin is ' + res.newPin + '.', 5000, false);
 		}
 	});
 }

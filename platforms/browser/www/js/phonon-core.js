@@ -117,18 +117,27 @@ phonon.device = (function () {
             break;
 
         case 'iOS':
-            osVersion = /OS (\d+)_(\d+)_?(\d+)?/.exec(nVer);
-            osVersion = osVersion[1] + '.' + osVersion[2] + '.' + (osVersion[3] | 0);
+
+            // iOS 8+ UA changed
+            if (/(iphone|ipod|ipad).* os 8_/.test(ua.toLowerCase())) {
+                osVersion = ua.toLowerCase().split('version/')[1].split(' ')[0];
+            } else {
+                osVersion = /OS (\d+)_(\d+)_?(\d+)?/.exec(nVer);
+                osVersion = osVersion[1] + '.' + osVersion[2] + '.' + (osVersion[3] | 0);
+            }
             break;
     }
 
 
     return {
         os: os,
-        osVersion: osVersion
+        osVersion: osVersion,
+        ANDROID: 'Android',
+        IOS: 'iOS'
     };
 
 })();
+
 phonon.browser = (function () {
 
     /**
@@ -237,11 +246,11 @@ phonon.ajax = (function () {
      * @private
      */
     var toJSON = function(responseText) {
-        var response;
+        var response = null;
         try  {
             response = JSON.parse(responseText);
         } catch (e) {
-            response = 'JSON_MALFORMED';
+            response = null;
         }
         return response;
     };
@@ -280,6 +289,7 @@ phonon.ajax = (function () {
 		var timeout = opts.timeout;
 		var success = opts.success;
 		var error = opts.error;
+		var headers = opts.headers;
 
         if(typeof method !== 'string') throw new TypeError('method must be a string');
         if(typeof url !== 'string') throw new TypeError('url must be a string');
@@ -300,25 +310,43 @@ phonon.ajax = (function () {
                 if(xhr.overrideMimeType) xhr.overrideMimeType('application/xml; charset=utf-8');
             }
 
-            xhr.onreadystatechange = function(event) {
-                if (xhr.readyState === 4) {
-                    if (xhr.status === 200) {
-                        // Success
+						if(typeof headers === 'object') {
+							var key;
+							for(key in headers) {
+								xhr.setRequestHeader(key, headers[key]);
+							}
+						}
 
-                        if(dataType === 'json') {
-                            var json = toJSON(xhr.responseText);
-                            if(json !== 'JSON_MALFORMED') success(json);
-                            else {
-                                if (typeof error === 'function') error(json, event);
-                            }
-                        } else if(dataType === 'xml') success(xhr.responseXML);
-                        else success(xhr.responseText);
+            xhr.onreadystatechange = function(event) {
+
+                if (xhr.readyState === 4) {
+
+										var res = null;
+
+										if(dataType === 'json') {
+											res = toJSON(xhr.responseText);
+											if(res === null) {
+												flagError = 'JSON_MALFORMED';
+											}
+										} else if(dataType === 'xml') {
+											res = xhr.responseXML;
+										} else {
+											res = xhr.responseText;
+										}
+
+										var status = xhr.status.toString();
+
+										// Success 2xx
+                    if (status[0] === '2') {
+
+											success(res, xhr);
 
                     } else {
-                        // page not found (error: 404)
+
+                        // error
                         if (typeof error === 'function') {
                             window.setTimeout(function() {
-                                error(flagError, event);
+                                error(res, flagError, xhr);
                             }, 1);
                         }
                     }
@@ -350,7 +378,8 @@ phonon.ajax = (function () {
         };
 	};
 })();
-phonon.event = (function () {
+
+phonon.event = (function ($) {
 
     /**
      * Events
@@ -359,29 +388,33 @@ phonon.event = (function () {
      * [3] transitionEnd and animationEnd polyfill
      */
 
+	// Use available events
+	// mousecancel does not exists
+    var availableEvents = ['mousedown', 'mousemove', 'mouseup'];
+
     // Check if touch is enabled
     var hasTouch = false;
     if(('ontouchstart' in window) || window.DocumentTouch && document instanceof DocumentTouch) {
         hasTouch = true;
+		availableEvents = ['touchstart', 'touchmove', 'touchend', 'touchcancel'];
     }
 
-    // Use available events
-    var desktopEvents = ['mousedown', 'mousemove', 'mouseup'];
-
     if (window.navigator.pointerEnabled) {
-        desktopEvents = ['pointerdown', 'pointermove', 'pointerup'];
+        availableEvents = ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'];
     } else if (window.navigator.msPointerEnabled) {
-        desktopEvents = ['MSPointerDown', 'MSPointerMove', 'MSPointerUp'];
+        availableEvents = ['MSPointerDown', 'MSPointerMove', 'MSPointerUp', 'MSPointerCancel'];
     }
 
     var api = {};
 
     api.hasTouch = hasTouch;
-    api.start = hasTouch ? 'touchstart' : desktopEvents[0];
-    api.move = hasTouch ? 'touchmove' : desktopEvents[1];
-    api.end = hasTouch ? 'touchend' : desktopEvents[2];
-    api.tap = 'tap';
 
+    api.start = availableEvents[0];
+    api.move = availableEvents[1];
+    api.end = availableEvents[2];
+	api.cancel = typeof availableEvents[3] === 'undefined' ? null : availableEvents[3];
+
+    api.tap = 'tap';
 
     /**
      * Animation/Transition event polyfill
@@ -429,10 +462,9 @@ phonon.event = (function () {
         transitionEnd = 'webkitTransitionEnd';
         animationEnd = 'webkitAnimationEnd';
     }
-    
+
     api.transitionEnd = transitionEnd;
     api.animationEnd = animationEnd;
-
 
     var tapEls = [];
 
@@ -444,49 +476,62 @@ phonon.event = (function () {
             this.moved = false;
             this.startX = 0;
             this.startY = 0;
-            this.hasTouchEventOccured = false;
+
             this.el.addEventListener(api.start, this, false);
         }
 
         TapElement.prototype.start = function(e) {
 
-            if (e.type === 'touchstart') {
-
-                this.hasTouchEventOccured = true;
-                this.el.addEventListener('touchmove', this, false);
-                this.el.addEventListener('touchend', this, false);
-                this.el.addEventListener('touchcancel', this, false);
-
-            } else {
-
-                this.el.addEventListener(api.end, this, false);
-            }
+            this.el.addEventListener(api.move, this, false);
+            this.el.addEventListener(api.end, this, false);
 
             this.moved = false;
-            this.startX = e.type === 'touchstart' ? e.touches[0].clientX : e.clientX;
-            this.startY = e.type === 'touchstart' ? e.touches[0].clientY : e.clientY;
+
+            this.startX = (e.touches ? e.touches[0].clientX : e.clientX);
+            this.startY = (e.touches ? e.touches[0].clientY : e.clientY);
         };
 
         TapElement.prototype.move = function(e) {
+
+			var moveX = (e.touches ? e.touches[0].clientX : e.clientX);
+            var moveY = (e.touches ? e.touches[0].clientY : e.clientY);
+
             //if finger moves more than 10px flag to cancel
-            if (Math.abs(e.touches[0].clientX - this.startX) > 10 || Math.abs(e.touches[0].clientY - this.startY) > 10) {
+            if (Math.abs(moveX - this.startX) > 10 || Math.abs(moveY - this.startY) > 10) {
                 this.moved = true;
             }
         };
 
         TapElement.prototype.end = function(e) {
-            this.el.removeEventListener('touchmove', this, false);
-            this.el.removeEventListener('touchend', this, false);
-            this.el.removeEventListener('touchcancel', this, false);
+
+			this.el.removeEventListener(api.move, this, false);
             this.el.removeEventListener(api.end, this, false);
 
+			if (api.cancel !== null) this.el.removeEventListener(api.cancel, this, false);
+
             if (!this.moved) {
+
+                /**
+                 * jQuery/Zepto compatibility with the tap event
+                 * See issue: #147
+                 */
+                if (typeof $ !== 'undefined') {
+                    var event = new window.CustomEvent(
+                    	this.tap,
+                    	{
+                    		detail: {},
+                    		bubbles: true,
+                    		cancelable: true
+                    	}
+                    );
+                    this.el.dispatchEvent(event);
+                }
+
                 this.callback(e);
             }
         };
 
         TapElement.prototype.cancel = function() {
-            this.hasTouchEventOccured = false;
             this.moved = false;
             this.startX = 0;
             this.startY = 0;
@@ -496,15 +541,15 @@ phonon.event = (function () {
             this.el.removeEventListener(api.start, this, false);
             this.el.removeEventListener(api.move, this, false);
             this.el.removeEventListener(api.end, this, false);
-            this.el.removeEventListener('touchcancel', this, false);
+			if(api.cancel !== null) this.el.removeEventListener(api.cancel, this, false);
         };
 
         TapElement.prototype.handleEvent = function(e) {
             switch (e.type) {
                 case api.start: this.start(e); break;
-                case 'touchmove': this.move(e); break;
+                case api.move: this.move(e); break;
                 case api.end: this.end(e); break;
-                case 'touchcancel': this.cancel(e); break;
+                case api.cancel: this.cancel(e); break; // api.cancel can be null
             }
         };
 
@@ -512,52 +557,78 @@ phonon.event = (function () {
     })();
 
     phonon.on = function(el, eventName, callback, useCapture) {
+        var addEvent = function(el, eventName, callback, useCapture) {
+            if(eventName === api.tap) {
+                var tap = new TapElement(el, callback);
+                tapEls.push(tap);
+                return;
+            }
 
-        if(eventName === api.tap) {
-            var tap = new TapElement(el, callback);
-            tapEls.push(tap);
-            return;
-        }
+            if(el.addEventListener) {
+                el.addEventListener(eventName, callback, useCapture);
+            } else if(el.attachEvent) {
+                el.attachEvent('on' + eventName, callback, useCapture);
+            }
+        };
 
-        if(el.addEventListener) {
-            el.addEventListener(eventName, callback, useCapture);
-        } else if(el.attachEvent) {
-            el.attachEvent('on' + eventName, callback, useCapture);
+        if(typeof el.length !== 'undefined') {
+            var i = 0;
+            var l = el.length;
+            for (; i < l; i++) {
+                addEvent(el[i], eventName, callback, useCapture)
+            }
+            return
         }
+        addEvent(el, eventName, callback, useCapture)
     };
 
-    window.on = document.on = HTMLElement.prototype.on = function(type, listener, useCapture) {
+    window.on = document.on = NodeList.prototype.on = HTMLElement.prototype.on = function(type, listener, useCapture) {
         phonon.on(this, type, listener, useCapture);
     };
 
     phonon.off = function(el, eventName, callback, useCapture) {
 
-        if(eventName === api.tap) {
-
-            for (var i = tapEls.length - 1; i >= 0; i--) {
-                if(tapEls[i].el === el) {
-                    tapEls[i].off();
-                    tapEls.splice(i, 1);
-                    break;
+        var removeEvent = function (el, eventName, callback, useCapture) {
+            if(eventName === api.tap) {
+                var i = 0;
+                var l = el.length;
+                for (; i < l; i++) {
+                    if(tapEls[i].el === el) {
+                        tapEls[i].off();
+                        tapEls.splice(i, 1);
+                        break;
+                    }
                 }
+                return;
             }
-            return;
+
+            if(el.removeEventListener) {
+                el.removeEventListener(eventName, callback, useCapture);
+            } else if(el.attachEvent) {
+                el.detachEvent('on' + eventName, callback, useCapture);
+            }
+        };
+
+        if(typeof el.length !== 'undefined') {
+            var i = 0;
+            var l = el.length;
+            for (; i < l; i++) {
+                removeEvent(el[i], eventName, callback, useCapture)
+            }
+            return
         }
 
-        if(el.removeEventListener) {
-            el.removeEventListener(eventName, callback, useCapture);
-        } else if(el.attachEvent) {
-            el.detachEvent('on' + eventName, callback, useCapture);
-        }
+        removeEvent(el, eventName, callback, useCapture)
     };
 
-    window.off = document.off = HTMLElement.prototype.off = function(type, listener, useCapture) {
+    window.off = document.off = NodeList.prototype.off = HTMLElement.prototype.off = function(type, listener, useCapture) {
         phonon.off(this, type, listener, useCapture);
     };
 
     return api;
 
-})();
+})(window.jQuery);
+
 phonon.tagManager = (function () {
 
 	if(typeof riot === 'undefined') {
@@ -599,7 +670,6 @@ phonon.tagManager = (function () {
 })();
 	// init
 	phonon.options = function(options) {
-
 		var useI18n = false;
 		if(typeof options.i18n === 'object' && options.i18n !== null) {
 			phonon.i18n(options.i18n);
@@ -613,16 +683,16 @@ phonon.tagManager = (function () {
 	/**
 	 * Shortcuts for dialog
 	 */
-	phonon.alert = function(text, title, cancelable) {
-		return phonon.dialog().alert(text, title, cancelable);
+	phonon.alert = function(text, title, cancelable, textOk) {
+		return phonon.dialog().alert(text, title, cancelable, textOk);
 	};
 
-	phonon.confirm = function(text, title, cancelable) {
-		return phonon.dialog().confirm(text, title, cancelable);
+	phonon.confirm = function(text, title, cancelable, textOk, textCancel) {
+		return phonon.dialog().confirm(text, title, cancelable, textOk, textCancel);
 	};
 
-	phonon.prompt = function(text, title, cancelable) {
-		return phonon.dialog().prompt(text, title, cancelable);
+	phonon.prompt = function(text, title, cancelable, textOk, textCancel) {
+		return phonon.dialog().prompt(text, title, cancelable, textOk, textCancel);
 	};
 
 	phonon.indicator = function(title, cancelable) {
@@ -655,6 +725,7 @@ phonon.tagManager = (function () {
 			}
 		});
 	};
+
 	
 	window.phonon = phonon
 
@@ -707,6 +778,16 @@ phonon.tagManager = (function () {
             el.textContent = text;
         }
     };
+    
+    /**
+    * Binds some html to the given DOM element
+    * @param {DOMObject} el
+    * @param {String} text
+    * @private
+    */
+    var setHtml = function (el, text){
+        el.innerHTML = text;
+    }
 
     /**
      * Binds the value to the given DOM element
@@ -749,6 +830,8 @@ phonon.tagManager = (function () {
                 if (json[value] !== undefined) {
                     if (key === 'text') {
                         setText(el, json[value]);
+                    } else if (key === 'html') {
+                        setHtml(el, json[value]);
                     } else if (key === 'value') {
                         setValue(el, json[value]);
                     } else if (key === 'placeholder') {
@@ -993,8 +1076,9 @@ phonon.tagManager = (function () {
     };
 
 }(window, document));
+
 /* ========================================================================
- * Phonon: navigator.js v1.1
+ * Phonon: navigator.js v1.2
  * http://phonon.quarkdev.com
  * ========================================================================
  * Licensed under MIT (http://phonon.quarkdev.com)
@@ -1002,6 +1086,8 @@ phonon.tagManager = (function () {
 ;(function (window, riot, phonon) {
 
   'use strict';
+
+  window.phononDOM = {}
 
   var pages = [];
   var pageHistory = [];
@@ -1018,6 +1104,7 @@ phonon.tagManager = (function () {
 
   var opts = {
     defaultPage: null,
+    defaultTemplateExtension: null,
     hashPrefix: '!',
     animatePages: true,
     templateRootDirectory: '',
@@ -1035,11 +1122,21 @@ phonon.tagManager = (function () {
 
     /**
      * @constructor
+	 * @param {Object} scope
      */
-    function Activity() {}
+    function Activity(scope) {
+		if(typeof scope === 'object') {
+			var handler;
+			for(handler in scope) {
+				if(this[handler] !== undefined && this[handler] !== 'constructor') {
+					this[handler + 'Callback'] = scope[handler];
+				}
+			}
+		}
+	}
 
     /**
-     * 
+     *
      * @param {Function} callback
      */
     Activity.prototype.onCreate = function (callback) {
@@ -1105,17 +1202,31 @@ phonon.tagManager = (function () {
    */
   var getPageObject = function(pageName) {
 
-    var page = null;
     var i = pages.length - 1;
 
     for (; i >= 0; i--) {
       if(pages[i].name === pageName) {
-        page = pages[i];
-        break;
+        return pages[i];
       }
     }
-    return page;
+    return null;
   };
+
+  function DOMEval(pageName, code) {
+      // create page in window object
+      if(typeof window.phononDOM[pageName] === 'undefined') {
+        window.phononDOM[pageName] = {}
+      }
+
+      // add a js variable as shortcut
+      var fullCode = 'var page = window.phononDOM["' + pageName + '"];';
+      fullCode += code;
+
+      // execute script
+	  var script = document.createElement('script');
+	  script.text = fullCode;
+	  document.head.appendChild(script).parentNode.removeChild(script);
+  }
 
   /**
    * Retrives the DOM element for a given page
@@ -1164,10 +1275,48 @@ phonon.tagManager = (function () {
 
       previousPageEl.classList.remove('app-active');
     }
+
     callTransitionEnd(currentPage);
     callHiddenCallback(previousPage);
 
     onActiveTransition = false;
+  }
+
+  function dispatchDOMEvent(eventName, pageName, parameters) {
+
+	  var eventInitDict = {
+          detail: { page: pageName },
+          bubbles: true,
+          cancelable: true
+      };
+
+	  if(typeof parameters !== 'undefined') {
+		  eventInitDict.detail.req = parameters
+	  }
+
+	  var event = new window.CustomEvent(eventName, eventInitDict);
+
+	  document.dispatchEvent(event);
+  }
+
+  /**
+   * Dispatches page event from addEvent API
+   *
+   * @param {String} eventName
+   * @param {Array} eventHandlers
+   * @param {Object} data
+   */
+  function dispatchEvent(eventName, eventHandlers, data) {
+      var i = 0;
+      var l = eventHandlers.length;
+      for (; i < l; i++) {
+          var eventHandler = eventHandlers[i]
+          if (eventHandler.event === eventName) {
+              if (typeof eventHandler.callback === 'function') {
+                  eventHandler.callback(data)
+              }
+          }
+      }
   }
 
   function callCreate(pageName) {
@@ -1177,30 +1326,33 @@ phonon.tagManager = (function () {
       phonon.tagManager.trigger(pageName, 'create');
     }
 
-    var page = getPageObject(pageName);
+    /*
+     * dispatch the event before calling the activity's callback
+     * so that UI components are ready to use
+     * issue #52 is related to this
+    */
+	dispatchDOMEvent('pagecreated', pageName)
 
-    // Page Scope is called once during the onCreate process
-    if(typeof page.callback === 'function') {
-      page.callback(page.activity);
-    }
+	var page = getPageObject(pageName);
 
     // Call the onCreate callback
     if(page.activity instanceof Activity && typeof page.activity.onCreateCallback === 'function') {
       page.activity.onCreateCallback();
     }
 
-    var pageEvent = new window.CustomEvent('pagecreated', {
-        detail: { page: pageName },
-        bubbles: true,
-        cancelable: true
-    });
-    
-    document.dispatchEvent(pageEvent);
+    dispatchEvent('create', page.callbackRegistered);
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onCreate'];
+        if(typeof fn === 'function') {
+            fn()
+        }
+    }
   }
 
   function callReady(pageName) {
 
-    var page = getPageObject(pageName);
+	var page = getPageObject(pageName);
 
     window.setTimeout(function() {
 
@@ -1209,19 +1361,22 @@ phonon.tagManager = (function () {
         phonon.tagManager.trigger(pageName, 'ready');
       }
 
+      // Dispatch the global event pageopened
+	  dispatchDOMEvent('pageopened', pageName)
+
       // Call the onReady callback
       if(page.activity instanceof Activity && typeof page.activity.onReadyCallback === 'function') {
         page.activity.onReadyCallback();
       }
 
-      // Dispatch the global event pageopened
-      var pageEvent = new window.CustomEvent('pageopened', {
-          detail: { page: pageName },
-          bubbles: true,
-          cancelable: true
-      });
+      dispatchEvent('ready', page.callbackRegistered)
 
-      document.dispatchEvent(pageEvent);
+      if(typeof window.phononDOM[page.name] === 'object') {
+          var fn = window.phononDOM[page.name]['onReady'];
+          if(typeof fn === 'function') {
+              fn()
+          }
+      }
 
     }, page.readyDelay);
   }
@@ -1231,24 +1386,47 @@ phonon.tagManager = (function () {
       phonon.tagManager.trigger(pageName, 'transitionend');
     }
 
+	dispatchDOMEvent('pagetransitionend', pageName);
+
     var page = getPageObject(pageName);
 
     // Call the onTransitionEnd callback
     if(page.activity instanceof Activity && typeof page.activity.onTransitionEndCallback === 'function') {
       page.activity.onTransitionEndCallback();
     }
+
+    dispatchEvent('transitionend', page.callbackRegistered)
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onTransitionEnd'];
+        if(typeof fn === 'function') {
+            fn()
+        }
+    }
   }
 
   function callHiddenCallback(pageName) {
+
     if(riotEnabled) {
       phonon.tagManager.trigger(pageName, 'hidden');
     }
+
+	dispatchDOMEvent('pagehidden', pageName)
 
     var page = getPageObject(pageName);
 
     // Call the onHidden callback
     if(page.activity instanceof Activity && typeof page.activity.onHiddenCallback === 'function') {
       page.activity.onHiddenCallback();
+    }
+
+    dispatchEvent('hidden', page.callbackRegistered)
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onHidden'];
+        if(typeof fn === 'function') {
+            fn()
+        }
     }
   }
 
@@ -1258,17 +1436,28 @@ phonon.tagManager = (function () {
       phonon.tagManager.trigger(pageName, 'tabchanged', tabNumber);
     }
 
+	dispatchDOMEvent('pagetabchanged', pageName)
+
     var page = getPageObject(pageName);
 
     // Call the onTabChanged callback
     if(page.activity instanceof Activity && typeof page.activity.onTabChangedCallback === 'function') {
       page.activity.onTabChangedCallback(tabNumber);
     }
+
+    dispatchEvent('tabchanged', page.callbackRegistered, tabNumber);
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onTabChanged'];
+        if(typeof fn === 'function') {
+            fn(tabNumber)
+        }
+    }
   }
 
   function callClose(pageName, nextPageName, hash) {
-
     function close() {
+	  dispatchDOMEvent('pageclosed', pageName)
 
       var currentHash = window.location.hash.split('#')[1];
 
@@ -1299,10 +1488,15 @@ phonon.tagManager = (function () {
     // Call the onclose callback
     if(page.activity instanceof Activity && typeof page.activity.onCloseCallback === 'function') {
       page.activity.onCloseCallback(api);
-    } else {
-      if(!riotEnabled) {
-        throw new Error('The page ' + page.name + ' prevents close, but its callback (onClose) is undefined');
-      }
+    }
+
+    dispatchEvent('close', page.callbackRegistered, api);
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onClose'];
+        if(typeof fn === 'function') {
+            fn(api)
+        }
     }
   }
 
@@ -1314,11 +1508,22 @@ phonon.tagManager = (function () {
       phonon.tagManager.trigger(pageName, 'hashchanged', params);
     }
 
+	dispatchDOMEvent('pagehash', pageName, params)
+
     var page = getPageObject(pageName);
 
     // Call the onHashChanged callback
     if(page.activity instanceof Activity && typeof page.activity.onHashChangedCallback === 'function') {
       page.activity.onHashChangedCallback(params);
+    }
+
+    dispatchEvent('hashchanged', page.callbackRegistered, params);
+
+    if(typeof window.phononDOM[page.name] === 'object') {
+        var fn = window.phononDOM[page.name]['onHashChanged'];
+        if(typeof fn === 'function') {
+            fn(params)
+        }
     }
   }
 
@@ -1328,8 +1533,7 @@ phonon.tagManager = (function () {
     }
   }
 
-  function mount(pageName, fn) {
-
+  function mount(pageName, fn, postData) {
     if(riotEnabled) {
 
       riot.compile(function() {
@@ -1352,7 +1556,21 @@ phonon.tagManager = (function () {
 
       if(page.content !== null) {
 
+        if(page.nocache === null || page.showloader === null){
+          var setLoaderAndCache = function(pageName){
+            var elPage = getPageEl(pageName);
+            page.nocache = false
+            page.showloader = false
+              if(elPage.getAttribute('data-nocache') === 'true') page.nocache = true
+              if(elPage.getAttribute('data-loader') === 'true') page.showloader = true
+          };
+          setLoaderAndCache(pageName)
+        }
+
+       if(page.showloader) document.body.classList.add('loading');
+
         loadContent(page.content, function(template) {
+          if(page.showloader) document.body.classList.remove('loading');
 
           var elPage = getPageEl(pageName);
 
@@ -1372,46 +1590,96 @@ phonon.tagManager = (function () {
             var attr = attrs.item(i);
             if(attr.nodeName !== 'class' && attr.nodeValue !== 'app-page') elPage.setAttribute(attr.nodeName, attr.nodeValue);
           }
-          
+
+
+		  var evalJs = function(element) {
+			  var s = element.getElementsByTagName('script');
+              // convert nodeList to array
+              s = Array.prototype.slice.call(s);
+			  for(var i=0; i < s.length; i++) {
+                  var type = s[i].getAttribute('type');
+                  if(type === 'text/javascript' || type === null) {
+                    DOMEval(page.name, s[i].innerHTML);
+                  }
+			  }
+		  };
+
           if(opts.useI18n) {
             phonon.i18n().bind(virtualElPage, function() {
               elPage.innerHTML = virtualElPage.innerHTML;
+			  evalJs(virtualDiv);
+
               fn();
             });
           } else {
             elPage.innerHTML = virtualElPage.innerHTML;
+			evalJs(virtualDiv);
             fn();
           }
-        
-        });
+
+        }, postData);
       } else {
         fn();
       }
     }
   }
 
-  function loadContent(url, fn) {
+  function loadContent(url, fn, postData) {
     var req = new XMLHttpRequest();
     if(req.overrideMimeType) req.overrideMimeType('text/html; charset=utf-8');
     req.onreadystatechange = function() {
-      if (req.readyState === 4 && req.status === 200) fn(req.responseText);
+      if(req.readyState === 4 && (req.status === 200 || !req.status && req.responseText.length)) {
+        fn(req.responseText, opts, url);
+      }
     };
-    req.open('GET', opts.templateRootDirectory + url, true);
-    req.send('');
+
+    if(typeof postData !== 'string'){
+      req.open('GET', opts.templateRootDirectory + url, true);
+      req.send('');
+    }else{
+      req.open('POST', opts.templateRootDirectory + url, true);
+      req.setRequestHeader('Content-type', 'application/x-www-form-urlencoded');
+      req.send(postData);
+    }
   }
 
-  function addPage(pageName) {
+  function createPage(pageName, properties) {
+	properties = typeof properties === 'object' ? properties : {};
 
-    var page = {
+	var newPage = {
       name: pageName,
       mounted: false,
       async: false,
       activity: null,
       content: null,
-      readyDelay: 1
-    };
+      readyDelay: 1,
+      callbackRegistered: [],
+      nocache: null,
+      showloader: null
+	};
 
-    pages.push(page);
+	var prop;
+	for(prop in properties) {
+		newPage[prop] = properties[prop];
+	}
+
+	return newPage;
+  }
+
+  function createOrUpdatePage(pageName, properties) {
+	  properties = typeof properties === 'object' ? properties : {};
+
+	  var page = getPageObject(pageName);
+	  if(page === null) {
+		  return pages.push(createPage(pageName, properties));
+	  }
+
+	  var prop;
+	  for(prop in properties) {
+		  page[prop] = properties[prop];
+	  }
+
+	  return true;
   }
 
   /**
@@ -1420,12 +1688,11 @@ phonon.tagManager = (function () {
    * @return {Boolean}
    */
   function isComponentVisible() {
-
     // close active dialogs, popovers, panels and side-panels
-    if(typeof phonon.dialog !== 'undefined' && phonon.dialog().closeActive()) return true;
-    if(typeof phonon.popover !== 'undefined' && phonon.popover().closeActive()) return true;
-    if(typeof phonon.panel !== 'undefined' && phonon.panel().closeActive()) return true;
-    if(typeof phonon.sidePanel !== 'undefined' && phonon.sidePanel().closeActive()) return true;
+    if(typeof phonon.dialog !== 'undefined' && phonon.dialogUtil.closeActive()) return true;
+    if(typeof phonon.popover !== 'undefined' && phonon.popoverUtil.closeActive()) return true;
+    if(typeof phonon.panel !== 'undefined' && phonon.panelUtil.closeActive()) return true;
+    if(typeof phonon.sidePanel !== 'undefined' && phonon.sidePanelUtil.closeActive()) return true;
 
     return false;
   }
@@ -1433,7 +1700,7 @@ phonon.tagManager = (function () {
   function getLastPage() {
     var page = {page: opts.defaultPage, params: ''};
     if(pageHistory.length > 0) {
-      
+
       var inddex = -1;
       var i = pageHistory.length - 1;
 
@@ -1452,8 +1719,36 @@ phonon.tagManager = (function () {
     return page;
   }
 
-  function navigationListener(evt) {
+  function serializeForm(evt){
+    var evt    = evt || window.event;
+    var form   = evt.target;
+    var field, query='';
+    if(typeof form == 'object' && form.nodeName == "FORM"){
+        var i;
+        for(i=form.elements.length-1; i>=0; i--){
+            field = form.elements[i];
+            if(field.name && field.type != 'file' && field.type != 'reset'){
+                if(field.type == 'select-multiple'){
+                    for(j=form.elements[i].options.length-1; j>=0; j--){
+                        if(field.options[j].selected){
+                            query += '&' + field.name + "=" + encodeURIComponent(field.options[j].value).replace(/%20/g,'+');
+                        }
+                    }
+                }
+                else{
+                    if((field.type != 'submit' && field.type != 'button') || evt.target == field){
+                        if((field.type != 'checkbox' && field.type != 'radio') || field.checked){
+                            query += '&' + field.name + "=" + encodeURIComponent(field.value).replace(/%20/g,'+');
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return query.substr(1);
+  }
 
+  function navigationListener(evt) {
     /*
      * user interactions are safed (with or without data-navigation | href)
      * the goal is to prevent the backward button if enableBrowserBackButton = false
@@ -1464,6 +1759,20 @@ phonon.tagManager = (function () {
     var nav = null;
     var validHref = false;
     var params = '';
+    var formData;
+
+    if(evt.type == 'submit'){ // dev
+      var formAction = target.getAttribute('action');
+      if(formAction.match(new RegExp('^#'+opts.hashPrefix))){
+          evt.preventDefault();
+          nav = formAction.substr(1+(opts.hashPrefix.length))
+          callClose(currentPage, nav, opts.hashPrefix+nav);
+          onBeforeTransition(nav, function() {
+              //callHash(nav);
+          }, serializeForm(evt)); // dev
+          return changePage(formAction.substr(1+(opts.hashPrefix.length)))
+      }
+    }
 
     for (; target && target !== document; target = target.parentNode) {
       var dataNav = target.getAttribute('data-navigation');
@@ -1562,9 +1871,18 @@ phonon.tagManager = (function () {
     }
   }
 
-  function onBeforeTransition(pageName) {
-
-    if(onActiveTransition) return;
+  /**
+   * Calls page events (onCreate, onReady) after
+   * the page is actually ready (set its template)
+   * @param {String} pageName
+   * @param {Function} callback
+   */
+  function onBeforeTransition(pageName, callback, postData) {
+    if(onActiveTransition) {
+      if(typeof callback === 'function') {
+        return callback();
+      }
+    }
 
     var page = getPageObject(pageName);
 
@@ -1576,8 +1894,7 @@ phonon.tagManager = (function () {
       currentPage = pageName;
     }
 
-    if(!page.mounted) {
-
+    if(!page.mounted || page.nocache) {
       mount(page.name, function() {
 
         page.mounted = true;
@@ -1600,15 +1917,25 @@ phonon.tagManager = (function () {
           }
         }
 
-      });
+        // call the callback after the mount
+        if(typeof callback === 'function') {
+          callback();
+        }
+      }, postData);
     } else {
 
       callReady(pageName);
       startTransition(previousPage, pageName);
+
+      // call the callback directly
+      if(typeof callback === 'function') {
+        callback();
+      }
     }
   }
 
   function init(options) {
+
     if(typeof options.templateRootDirectory === 'string' && options.templateRootDirectory !== '') {
       options.templateRootDirectory = ( (options.templateRootDirectory.indexOf('/', options.templateRootDirectory.length - '/'.length) !== -1) ? options.templateRootDirectory : options.templateRootDirectory + '/');
     }
@@ -1634,7 +1961,7 @@ phonon.tagManager = (function () {
         page.classList.add('app-page');
       }
 
-      addPage( page.tagName.toLowerCase() );
+      createOrUpdatePage( page.tagName.toLowerCase() );
     }
   }
 
@@ -1685,10 +2012,8 @@ phonon.tagManager = (function () {
   /**
    * @param {String | HashEvent} virtualHash
    */
-  function onRoute(virtualHash) {
-
+  function onRoute(virtualHash, postData) {
     var hash = (typeof virtualHash === 'string' ? virtualHash : window.location.href.split('#')[1] || '');
-
     var pageName;
 
     var parsed = hash.split('/');
@@ -1721,7 +2046,7 @@ phonon.tagManager = (function () {
       pageObject = getPageObject(opts.defaultPage);
 
       /*
-       * updates the URL if necessary 
+       * updates the URL if necessary
        */
       if(opts.useHash) {
 
@@ -1776,13 +2101,30 @@ phonon.tagManager = (function () {
       }
 
       if(!inArray) {
-        var strParams = params.join('');
+        var strParams = params.join('/');
         pageHistory.push( {page: pageObject.name, params: strParams} );
       }
 
-      onBeforeTransition(pageObject.name);
+      /*
+       * Page Scope is called once before calling callbacks
+       * since v1.0.8, we call the page scope here when the page is not yet mounted
+       * because before this version, the onCreate callback was called before the onHash callback
+       * since v1.0.2 the order has changed => the onHash callback is called before page callbacks (onCreate, etc.)
+       * see issues: #16, #31 and #38
+       */
+      if(typeof pageObject.callback === 'function' && !pageObject.mounted) {
+        pageObject.callback(pageObject.activity);
+      }
 
-      callHash(currentPage, params);
+      if(!pageObject.mounted) {
+        onBeforeTransition(pageObject.name, function() {
+          callHash(pageObject.name, params);
+        }, postData);
+
+      } else {
+        onBeforeTransition(pageObject.name, null, postData);
+        callHash(pageObject.name, params);
+      }
 
       if(!opts.enableBrowserBackButton) safeLink = false;
     }
@@ -1792,33 +2134,34 @@ phonon.tagManager = (function () {
    * One listener to navigate through the app pages
    */
   document.on('tap', navigationListener);
+  /**
+   * Handle (port) forms to event
+   */
+  document.on('submit', navigationListener);
 
   /*
-   * we do not call onRoute() directly because it is used in callClose
+   * [1] we do not call onRoute() directly because it is used in callClose
    * in order to prevent the back button on navigator:
    * the hash changes, but it is refused by this module (not trusted behavior)
    * so we need to call this function with a "virtual hash" as argument
+   * [2] window.on(...) seems buggy
    */
-  if(opts.useHash) window.on('hashchange', onRoute);
+  if(opts.useHash) window.addEventListener('hashchange', onRoute);
 
   document.on('backbutton', function() {
-    var pObj = getLastPage();
-    if(currentPage === opts.defaultPage) {
-      return;
-    }
-    
-    callClose(currentPage, pObj.page, opts.hashPrefix + pObj.page + '/' + pObj.params);
+    var last = getLastPage();
+    callClose(currentPage, last.page, opts.hashPrefix + last.page + '/' + last.params);
   });
 
-
   phonon.navigator = function(options) {
-
     if(typeof options === 'object') {
       init(options);
     }
 
     return {
+
       currentPage: currentPage,
+      previousPage: previousPage,
       start: start,
       changePage: function(pageName, pageParams) {
         safeLink = true;
@@ -1845,18 +2188,44 @@ phonon.tagManager = (function () {
         if(typeof options.readyDelay !== 'undefined' && typeof options.readyDelay !== 'number') {
           throw new Error('readyDelay option must be a number');
         }
-
-        var p = getPageObject(options.page);
-
-        if(p) {
-          p.activity = (typeof callback === 'function' ? new Activity() : null);
-          p.callback = callback;
-          p.async = (typeof options.preventClose === 'boolean' ? options.preventClose : false);
-          p.content = (typeof options.content === 'string' ? options.content : null);
-          p.readyDelay = (typeof options.readyDelay === 'number' ? options.readyDelay : 1);
-        } else {
-          throw new Error('A namespace for  ' + options.page + ' is detected, but the DOM node <' + options.page + '> is not found.');
+        if(typeof options.content !== null && typeof opts.defaultTemplateExtension === 'string') {
+            options.content = options.page + '.' + opts.defaultTemplateExtension;
         }
+
+        // vuejs, riotjs support
+        var page = getPageObject(options.page);
+        var exists = page === null ? false : true;
+        if(!exists) {
+            page = createPage(options.page);
+        }
+
+        if(typeof callback === 'function' || typeof callback === 'object') {
+          page.activity = new Activity(callback);
+        } else {
+          page.activity = null;
+        }
+
+        page.callback = callback;
+        page.async = (typeof options.preventClose === 'boolean' ? options.preventClose : false);
+        page.content = (typeof options.content === 'string' ? options.content : null);
+        page.readyDelay = (typeof options.readyDelay === 'number' ? options.readyDelay : 1);
+
+        createOrUpdatePage(options.page.toLowerCase(), page);
+      },
+      // register a page event only such as home:create
+      onPage: function (pageName) {
+          if (typeof pageName !== 'string'){
+              throw new Error('PageName must be a string');
+          }
+
+          createOrUpdatePage(pageName, {});
+
+          return {
+              addEvent: function (eventName, callback) {
+                  var page = getPageObject(pageName);
+                  page.callbackRegistered.push({event: eventName, callback: callback});
+              }
+          }
       },
       callCallback: callCallback
     };
