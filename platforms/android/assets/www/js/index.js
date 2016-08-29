@@ -45,7 +45,6 @@ app.on({page: 'roomassignment', preventClose: true, content: 'roomassignment.htm
 	var authInfo = JSON.parse(window.localStorage.getItem("token"));
 	var req = $.ajax({
 		    method: 'GET',
-		    contentType: "application/json",
 		    data: {"username": authInfo.username, "password": authInfo.password},
 		    url: 'https://jrvcd.xyz:9000/assignment',
 		    crossDomain: true,
@@ -87,6 +86,35 @@ app.on({page: 'messagecenter', preventClose: true, content: 'messagecenter.html'
 				hasBeenViewed = "Yes";
 			    }
 			    document.getElementById("mctablebody").innerHTML += '<tr><td >' + res.messages[i].description + '</td><td >' + res.messages[i].date + '</td><td >' + hasBeenViewed + '</td></tr>';
+			}
+		    }
+	    });
+	});
+
+    activity.onClose(function(self) {
+    });
+});
+
+app.on({page: 'schedule', preventClose: true, content: 'schedule.html', readyDelay: 1}, function(activity) {
+    var onAction = function(evt) {
+    };
+
+    activity.onCreate(function() {
+	var authInfo = JSON.parse(window.localStorage.getItem("token"));
+	var req = $.ajax({
+		    method: 'GET',
+		    data: "username=" + authInfo.username + "&password=" + authInfo.password,
+		    url: 'https://jrvcd.xyz:9002/studentcenter/schedule',
+		    crossDomain: true,
+		    success: function(res) {
+			document.getElementById("schedule-loading").remove();
+			for(i = 0; i < res.schedule.length; i++) {
+			    var currentEvent = res.schedule[i];
+			    var daysString = "";
+			    for(var z = 0; z < currentEvent.days.length; z++) {
+				daysString += currentEvent.days[z] + ", ";
+			    }
+			    document.getElementById("schedule-list").innerHTML += '<li class="padded-list"><b>' + currentEvent.name + '</b> ' + daysString + ' @ ' + currentEvent.time + ' - ' + currentEvent.location + '</li>';
 			}
 		    }
 	    });
